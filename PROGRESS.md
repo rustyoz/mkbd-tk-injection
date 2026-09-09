@@ -1,5 +1,34 @@
 # Progress log
 
+## 2026-09-10 (8) — 3-line summary, shell-side (engine untouched)
+
+`pairmodernkeyboard.sh` now captures the engine's full output to a temp log and
+prints a 3-line summary. `test/tk-pair.py` / `test/phase4.py` are byte-identical
+to `00be113` — the filtering is entirely in the wrapper, so it can't regress the
+pairing path.
+
+Working run on hardware (adapter `68:54:5A:D0:87:74`, keyboard now at `F0`):
+
+```
+$ sudo ./pairmodernkeyboard.sh
+Modern Keyboard  ·  C9:6C:7E:F0:6C:7E
+paired (authenticated) · 9/9 CCCDs · address ADOPTED
+unplug USB & power-cycle the keyboard — it reconnects on its own
+```
+
+Under the hood that run was: Phase-0 `pair status: success` `key_type=1`
+`IRK 18A04D3E…`, bond `/var/lib/bluetooth/68:54:5A:D0:87:74/C9:6C:7E:F0:6C:7E/info`;
+Phase-4 `subscribed 9/9 CCCDs`, keyboard held the ATT link 3.2 s;
+`F1 re-read: current_addr=C9:6C:7E:F0:6C:7E → ADOPTED`.
+
+- `-v` / `--verbose` → stream the full engine output (`::` lines, MGMT events,
+  LTK, the `Created symlink … bluetooth.service → /dev/null` mask noise).
+- `--diag` → full output + btmon SMP trace + dmesg.
+- non-zero exit → the whole captured log is dumped (indented) so failures stay
+  debuggable.
+
+---
+
 ## 2026-09-10 (7) — REVERT the quiet refactor; it broke pairing
 
 `99ab527` ("quiet by default") broke the pair on hardware — `v0.1.0` and the
