@@ -93,6 +93,10 @@ def main():
                     help="1 = LE random (static) [keyboard], 0 = public")
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--keep-btmon", action="store_true")
+    ap.add_argument("--no-phase4", action="store_true",
+                    help="stop after the Phase-0 pair; skip GATT provisioning")
+    ap.add_argument("--p4-rounds", type=int, default=2,
+                    help="phase-4 connect/provision/hold rounds (default 2)")
     args = ap.parse_args()
 
     if os.geteuid() != 0:
@@ -113,33 +117,50 @@ def main():
     node = devs[0].node
     print(f":: vendor hidraw : {node}")
 
+    # --- USB F1/F2/F3 first (pure USB, no bluetoothd involvement) ---
+    print(":: USB F1/F2/F3 ...")
+    fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        res = m.vendor_pairing_exchange(fd, adapter)
+    finally:
+        os.close(fd)
+    addr = res["new_addr"]
+    tk = res["tk"]
+    print(f"   bond already on keyboard : {res['bond_exists']}")
+    print(f"   keyboard addr (was)      : {res['current_addr']}")
+    print(f"   keyboard addr (new bond) : {addr}")
+    print(f"   one-time F3 TK           : {tk.hex().upper()}")
+    print(f"   device name              : {res['name']!r}")
+
     snoop = f"/tmp/mkbd-tkinj-{int(time.time())}.btsnoop"
     btmon = None
     keys = None
-    res = {}
     # bluetoothd's adapter-init storm tears down SMP mid-flight; mask it like
     # mkbd-provision --commit does, restore in finally.
     subprocess.run(["systemctl", "mask", "--now", "bluetooth"], check=False)
     subprocess.run(["systemctl", "stop", "bluetooth"], check=False)
     try:
         m.mgmt_set_powered(True)
+
+        # Clear any stale bond for this address: bluetoothd loads stored LTKs
+        # into the kernel on boot, so MGMT Pair Device would return 0x13
+        # (Already Paired) and never re-run SMP. Remove the on-disk bond dir and
+        # tell the kernel to unpair.
+        bond_dir = f"/var/lib/bluetooth/{adapter}/{addr}"
+        if os.path.isdir(bond_dir):
+            subprocess.run(["rm", "-rf", bond_dir], check=False)
+            print(f":: removed stale bond dir {bond_dir}")
+        try:
+            addr_le = m.bdaddr_to_bytes(addr, little_endian=True)
+            m._mgmt_cmd(m.MGMT_OP_UNPAIR_DEVICE,
+                        addr_le + bytes([m.MGMT_ADDR_LE_RANDOM, 1]), args.hci_index)
+            print(":: MGMT Unpair Device (cleared kernel bond)")
+        except SystemExit:
+            pass  # "not paired" is fine
+
         btmon = subprocess.Popen(["btmon", "-w", snoop],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.5)
-
-        print(":: USB F1/F2/F3 ...")
-        fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
-        try:
-            res = m.vendor_pairing_exchange(fd, adapter)
-        finally:
-            os.close(fd)
-        addr = res["new_addr"]
-        tk = res["tk"]
-        print(f"   bond already on keyboard : {res['bond_exists']}")
-        print(f"   keyboard addr (was)      : {res['current_addr']}")
-        print(f"   keyboard addr (new bond) : {addr}")
-        print(f"   one-time F3 TK           : {tk.hex().upper()}")
-        print(f"   device name              : {res['name']!r}")
 
         tkb = tk[::-1] if args.tk_order == "reversed" else tk
         line = f"{addr} {args.addr_type} {tkb.hex()}"
@@ -171,6 +192,17 @@ def main():
                   f"via in-kernel legacy OOB SMP  "
                   f"{'*** PHASE 0 WORKS ***' if auth else '(key_type not 1/3 — check)'}")
             keys = ltk
+
+            if not args.no_phase4:
+                # bluetoothd still masked here — phase4 uses a raw L2CAP ATT
+                # socket with the LTK the kernel just stored.
+                print()
+                print("=== phase 4: bonded GATT provisioning " + "=" * 28)
+                subprocess.run(
+                    [sys.executable, os.path.join(_here, "phase4.py"), addr,
+                     "--adapter", adapter, "--hci", args.hci, "--f3-check",
+                     "--rounds", str(args.p4_rounds)],
+                    check=False)
         else:
             print()
             print("FAIL: no LTK distributed.")
