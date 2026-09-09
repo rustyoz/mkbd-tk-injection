@@ -32,6 +32,54 @@ except ImportError as e:
              f"  set MKBD=/path/to/modernkeyboard")
 
 
+def _dump_diag(snoop):
+    """Print the SMP/connection-relevant lines from the btmon capture + dmesg."""
+    print()
+    print("=== btmon (filtered) " + "=" * 45)
+    try:
+        out = subprocess.run(["btmon", "-r", snoop], capture_output=True,
+                             text=True, timeout=30).stdout
+    except Exception as e:
+        print(f"  (btmon decode failed: {e})")
+        out = ""
+    keep = ("LE Create Connection", "LE Enhanced Create Connection",
+            "LE Connection Complete", "LE Extended Advertising Report",
+            "Advertising Report", "Connect Complete", "Disconnect",
+            "Reason:", "SMP:", "Pairing Request", "Pairing Response",
+            "Pairing Confirm", "Pairing Random", "Pairing Failed",
+            "Identity", "Encryption Information", "Central Identification",
+            "Long Term Key", "Encryption Change", "Encrypt Change",
+            "OOB", "AuthReq", "Authentication Req", "IO Capability",
+            "Key Distribution", "Bonding")
+    ctx = 0
+    for ln in out.splitlines():
+        s = ln.strip()
+        if any(k in ln for k in keep):
+            print("  " + ln.rstrip())
+            ctx = 2
+        elif ctx and (s.startswith(("Handle:", "Status:", "Address:", "Reason:",
+                                    "Method:", "Key size:", "Random:", "Confirm:"))):
+            print("  " + ln.rstrip())
+            ctx -= 1
+        else:
+            ctx = 0
+    if not out:
+        print("  (empty capture)")
+    print("=== dmesg (bluetooth/smp) " + "=" * 40)
+    try:
+        dm = subprocess.run(["dmesg"], capture_output=True, text=True,
+                            timeout=10).stdout.splitlines()
+        tail = [l for l in dm if any(k in l.lower() for k in
+                ("bluetooth", "smp", "legacy oob tk", "hci0", "l2cap"))][-25:]
+        for l in tail:
+            print("  " + l)
+        if not tail:
+            print("  (nothing)")
+    except Exception as e:
+        print(f"  (dmesg failed: {e})")
+    print("=" * 66)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -141,10 +189,8 @@ def main():
                 btmon.kill()
         subprocess.run(["systemctl", "unmask", "bluetooth"], check=False)
         subprocess.run(["systemctl", "start", "bluetooth"], check=False)
-        print()
-        print(f":: btmon capture : {snoop}")
-        print(f"   sudo btmon -r {snoop} | less   # look for: our Pairing Request "
-              "OOB=present, Confirm/Random x2, Encryption Change status 0")
+        _dump_diag(snoop)
+        print(f":: full capture  : sudo btmon -r {snoop}")
 
     if keys:
         time.sleep(2)
