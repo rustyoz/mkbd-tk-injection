@@ -102,6 +102,7 @@ def main():
     if os.geteuid() != 0:
         sys.exit("run as root")
 
+    hci_index = int("".join(c for c in args.hci if c.isdigit()) or "0")
     dbg = f"/sys/kernel/debug/bluetooth/{args.hci}/le_legacy_oob_tk"
     if not os.path.exists(dbg):
         sys.exit(f"{dbg} missing — patched bluetooth.ko not loaded.\n"
@@ -153,7 +154,7 @@ def main():
         try:
             addr_le = m.bdaddr_to_bytes(addr, little_endian=True)
             m._mgmt_cmd(m.MGMT_OP_UNPAIR_DEVICE,
-                        addr_le + bytes([m.MGMT_ADDR_LE_RANDOM, 1]), args.hci_index)
+                        addr_le + bytes([m.MGMT_ADDR_LE_RANDOM, 1]), hci_index)
             print(":: MGMT Unpair Device (cleared kernel bond)")
         except SystemExit:
             pass  # "not paired" is fine
