@@ -1,5 +1,50 @@
 # Progress log
 
+## 2026-09-10 (3) — host identity confirmed in phase 3; still HALF-BOND; phase4.py written
+
+Hardware run with the host-identity module:
+
+- pair success, `key_type=1`, IRK 18A04D3E… (the known stable one).
+- btmon: a **second** `SMP: Identity Information` + `SMP: Identity Address
+  Information` with **`Address: 68:54:5A:D0:87:74`** (our adapter) goes out —
+  `local_dist |= SMP_DIST_ID_KEY` works, host identity is now distributed.
+- **F1 re-read: `current_addr` still `C9:6C:7E:E1:6C:7E`, not the bonded
+  `…E2…`** → **HALF-BOND**. Host identity in phase 3 is necessary but **not
+  sufficient**; phase-4 GATT + hold is required.
+- Also hit MGMT `0x13` (Already Paired) when a bond from the prior run was still
+  loaded → `tk-pair.py` now clears it (rm bond dir + MGMT Unpair Device) before
+  pairing.
+
+**`test/phase4.py`** — bonded GATT provisioning over a raw L2CAP ATT socket
+(Python 3.14, CID 4, `BT_SECURITY_HIGH` so the kernel encrypts with the stored
+LTK; no bluetoothd, no controller seizure). Per `BOND-COMPLETION.md` "Phase 4":
+
+1. MTU exchange, full GATT discovery (printed for handle verification).
+2. Subscribe CCCDs — Write Req `01 00` to `0x0017,001d,0021,0025,0029,002d,
+   0031,0035` + vendor `0x000c`.
+3. Write Cmd `01` ×3 → handle `0x0038` (Report ID 1 / Output = LED; "possibly
+   load-bearing").
+4. Write Req → handle `0x0041` (Report ID 0x24 / Feature): `E2 06 <token:4LE>
+   <13× 00>` — 19 bytes, token arbitrary (notification echoes it +0x00010000;
+   the old "host name UTF-16LE" was leaked Windows stack, not a real field).
+5. Await HVN on `0x0024`: `e2 00 0a 00 …`.
+6. Read `0x000e` / `0x000b` (MS accessory vendor svc `d4e3e3eb-…`).
+7. Hold 7 s, disconnect; repeat (2 rounds — Windows does 2–3 short
+   connections); the reconnect on the LTK = the NVM-flush step.
+8. Re-read USB F1 → address adoption.
+
+All handles default to the BOND-COMPLETION.md values (keyboard's own GATT DB,
+adapter-independent) and are `--`overridable; discovery output flags a mismatch.
+
+`tk-pair.py` runs `phase4.py` automatically after a successful Phase-0 pair
+(`--no-phase4` to skip, `--p4-rounds N`).
+
+**No module rebuild — just re-run `sudo test/hw-test.sh`.** Watch: the GATT
+discovery dump (do the handles match?), whether the `0x0024` notification comes
+back, and the final `address adoption` line.
+
+---
+
 ## 2026-09-10 (2) — toward phase-4: distribute host identity in phase 3
 
 Phase 0's bond had our Pairing Request offering `init_key_dist =
