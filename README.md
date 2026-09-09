@@ -28,7 +28,7 @@ Full phased plan in [`PLAN.md`](PLAN.md) (copied from
 
 | Phase | Scope | State |
 |---|---|---|
-| **0** | debugfs knob in `smp.c`, prove the injection point on hardware | **patch written, compiles; not yet hardware-tested** |
+| **0** | debugfs knob in `smp.c`, prove the injection point on hardware | **patch written; `bluetooth.ko` built for the running kernel (7.1.9-arch1-2); hardware test blocked on root + keyboard** |
 | 1 | `MGMT_OP_ADD_REMOTE_OOB_DATA` `le_legacy_tk` field + BlueZ D-Bus method + `mkbd-provision` rewrite | not started |
 | 2 | kernel + BlueZ upstream submission | not started |
 
@@ -50,8 +50,15 @@ build/                          (gitignored) kernel source tree, scratch
 
 ## Status — 2026-09-09
 
-Phase 0 patch (`kernel/0001-*.patch`) written against **linux-7.2.3** and
-compiles clean (`W=1`, no warnings) for `net/bluetooth/smp.o` and
-`hci_debugfs.o`. Running kernel on this box is `7.1.9-arch1-2`; installed is
-`7.2.3.arch1-3` (reboot pending). Hardware test is the next step and needs the
-physical keyboard — see `test/hw-test.sh` and `PROGRESS.md`.
+Phase 0 patch (`kernel/0001-*.patch`) written against linux-7.2.3, also applies
+clean to **linux-7.1.9** (the running kernel). Compiles clean (`W=1`).
+
+A patched module for the **running** kernel is built:
+`artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko` (gitignored), vermagic
+`7.1.9-arch1-2`, loads without a reboot.
+
+**Hardware test not yet run** — blocked on: (1) root (no passwordless sudo),
+(2) the Modern Keyboard is not on the USB bus, (3) the running `bluetooth.ko` is
+an unidentified override under `/lib/modules/.../updates/` that my build would
+replace. To run once unblocked: `sudo test/load-and-test.sh`. Details in
+`PROGRESS.md`.

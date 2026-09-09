@@ -1,5 +1,75 @@
 # Progress log
 
+## 2026-09-09 (later) — patched bluetooth.ko built for the RUNNING kernel; test blocked
+
+### Done
+
+- Found a full build tree for the **running** kernel at
+  `/usr/lib/modules/7.1.9-arch1-2/build` (headers/`.config`/`Module.symvers`;
+  `net/bluetooth/` stripped). So a module can be built that loads **without a
+  reboot**.
+- Fetched `linux-7.1.9` source
+  (`sha256` of `linux-7.1.9.tar.xz` from cdn.kernel.org). The Phase 0 patch
+  applies to 7.1.9 with only line-offset shifts (dry-run + real apply clean;
+  hunk 1 `fuzz 2` on the `#include` block — landed correctly, verified).
+- Confirmed the 7.1.9 SMP behavioural prerequisites are identical to 7.2.3:
+  `authenticated = hcon->sec_level == BT_SECURITY_HIGH` (smp.c:2725),
+  `conn->sec_level = conn->pending_sec_level` on LE Encryption Change
+  (hci_event.c:5206), STK stored with `SMP_FLAG_MITM_AUTH`. All 5 `REQ_OOB`
+  reads are in SC-only functions.
+- **Built `artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko`.** Clean compile.
+  `vermagic: 7.1.9-arch1-2 SMP preempt mod_unload` — exact match for the running
+  kernel. Contains `smp_le_legacy_oob_tk_get`, `le_legacy_oob_tk_write`,
+  `smp_le_legacy_oob_tk_debugfs_create`. `depends: rfkill` (same as stock).
+  - `.config` + `Module.symvers` taken from
+    `/usr/lib/modules/7.1.9-arch1-2/build/`.
+  - `CONFIG_LOCALVERSION_AUTO` off + `localversion.05-arch` (`-arch1`) +
+    `localversion.10-pkgrel` (`-2`) to reproduce `kernel.release =
+    7.1.9-arch1-2`. Without this the module built as bare `7.1.9` and would not
+    load.
+  - `bc` still missing; `build/shim/bc` cats the installed 7.1.9
+    `include/generated/timeconst.h`.
+- Added `test/load-and-test.sh` — one root command: back up / unload the stack,
+  `insmod` the patched module, verify the debugfs knob appeared, run
+  `hw-test.sh`, restore the on-disk module on exit.
+
+### BLOCKED — the hardware run needs the user
+
+1. **No root.** `sudo` needs a password here. `insmod`/`rmmod` and both test
+   scripts (`EUID==0`) cannot run.
+2. **Keyboard not attached.** `lsusb` shows no `045e:081x` on the bus. Nothing
+   to pair. (hidraw devices present are a `0461:4E04` keyboard and 3× Razer
+   `1532:0053` — not the Modern Keyboard.)
+3. **Unknown `bluetooth.ko` override.** The running module loads from
+   `/lib/modules/7.1.9-arch1-2/updates/bluetooth.ko` (dated 2026-09-07 23:06,
+   **not** owned by any pacman package, **not** dkms — dkms only has nvidia).
+   Both it and the stock in-tree `bluetooth.ko.zst` report "Bluetooth Core ver
+   2.22" (the mainline version string, unchanged for years, so uninformative),
+   but their `srcversion` differ, so `updates/` is a distinct build from
+   unknown source. My module is built from **mainline 7.1.9** + the patch;
+   loading it replaces that override. If the override carries unrelated changes
+   they are lost while testing. `load-and-test.sh` restores the on-disk file on
+   exit, so this is reversible, but the user should know what that override is
+   before running.
+
+### To run the test (user, with the keyboard plugged in and on)
+
+```bash
+cd ~/Work/mkbd-tk-injection
+sudo test/load-and-test.sh
+```
+
+Watch for, in the btmon capture it writes to `/tmp/mkbd-tkinj-*.btsnoop`:
+our Pairing Request **OOB flag = present**; Pairing Confirm/Random both ways;
+Encryption Change (Status 0); LTK/EDIV/Rand/IRK distributed; bond under
+`/var/lib/bluetooth/<adapter>/<addr>/info` with `Authenticated=1`.
+`dmesg | grep 'using LE legacy OOB TK'` should fire once.
+
+If `Pairing Failed 0x04` after our Confirm → `sudo TKORDER=reversed
+test/hw-test.sh` (byte order of the F3 TK).
+
+---
+
 ## 2026-09-09 — repo created, Phase 0 patch written & compiled
 
 ### Done

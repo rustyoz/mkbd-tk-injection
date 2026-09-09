@@ -7,3 +7,4 @@ build/
 Module.symvers
 modules.order
 *.tar.xz
+artifacts/
