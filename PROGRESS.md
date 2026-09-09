@@ -1,5 +1,35 @@
 # Progress log
 
+## 2026-09-10 (6) — one command: `pairmodernkeyboard.sh`, quiet by default
+
+Confirmed on hardware: the trimmed 1-round phase-4 still adopts. Packaged it.
+
+- **`pairmodernkeyboard.sh`** (repo root) — the entry point. Preflight (root,
+  patched module loaded, keyboard on USB) then runs the engine. `test/hw-test.sh`
+  is now a back-compat stub that execs it.
+- **Quiet by default.** A whole run is 6 lines:
+  ```
+  Modern Keyboard  ·  adapter …
+    USB handshake     C9:6C:7E:Ex:6C:7E
+    pair              authenticated
+    provision         9/9 CCCDs, link held 7.1s
+    address adopted   yes
+  Paired …. Unplug USB, power-cycle — it reconnects on its own.
+  ```
+  `-v` restores the TK/LTK/MGMT-event/CCCD detail; `--diag` adds the btmon
+  filtered SMP trace + dmesg (both were unconditional before).
+- **`phase4.py`** refactored: `phase4.run(adapter, kbd, …) -> {cccd_ok, held,
+  adopted}`, imported by `tk-pair.py` (one process now, coherent output);
+  `main()` kept for standalone use.
+- **systemd mask noise gone.** The pair masks `bluetooth.service` (it's
+  D-Bus-activated and its adapter-init storm kills SMP mid-flight — `stop`
+  alone doesn't hold). Now `mask --runtime` (symlink under `/run`, tmpfs, can't
+  survive a reboot) with stderr hushed, so no more
+  `Created symlink /etc/systemd/system/bluetooth.service → /dev/null` /
+  `Removed …` lines. Still fully reverted in `finally`.
+
+---
+
 ## 2026-09-10 (5) — trim to the minimal flow, cut the noise (post-v0.1.0)
 
 Locked in the minimal path from run (4) and stripped the scaffolding.

@@ -42,11 +42,12 @@ kernel/                         kernel patches (against linux-7.2.3)
   0001-Bluetooth-SMP-inject-LE-legacy-OOB-Temporary-Key-via-.patch   Phase 0
   README.md                     how to apply / build / test
 bluez/                          BlueZ patches (Phase 1, empty for now)
+pairmodernkeyboard.sh           ← the command: Phase-0 pair + Phase-4 GATT + adoption check
 test/
   install-module.sh / uninstall-module.sh   swap the patched bluetooth.ko on disk (+ persist uhid); reboot
-  hw-test.sh                    end-to-end: Phase-0 pair -> phase4.py -> adoption check (thin wrapper)
-  tk-pair.py                    Phase-0 driver (F1/F2/F3 -> inject TK -> MGMT Pair Device -> bond)
-  phase4.py                    bonded GATT provisioning over raw L2CAP ATT
+  tk-pair.py                    Phase-0 engine (F1/F2/F3 -> inject TK -> MGMT Pair Device -> bond -> phase4)
+  phase4.py                    Phase-4: bonded GATT provisioning over raw L2CAP ATT (also importable)
+  hw-test.sh                    back-compat stub -> ../pairmodernkeyboard.sh
 notes/
   smp-codepaths.md              analysis of the kernel SMP paths the patch touches
 build/                          (gitignored) kernel source tree, scratch
@@ -72,8 +73,18 @@ no `HCI_CHANNEL_USER`:
    `Connected: yes, Bonded: yes`, `input-keyboard`, battery %, kernel HID input
    device created (`uhid` is auto-loaded by `install-module.sh`).
 
-`sudo test/hw-test.sh` does 1→3 (Phase-0 pair + Phase-4 GATT + adoption check),
-~15 s. Add `--diag` for the btmon SMP trace + dmesg dump.
+```
+$ sudo ./pairmodernkeyboard.sh
+Modern Keyboard  ·  adapter 68:54:5A:D0:87:74
+  USB handshake     C9:6C:7E:E5:6C:7E
+  pair              authenticated
+  provision         9/9 CCCDs, link held 7.1s
+  address adopted   yes
+
+Paired C9:6C:7E:E5:6C:7E. Unplug USB, power-cycle the keyboard — it reconnects on its own.
+```
+
+~15 s. `-v` for detail, `--diag` for the btmon SMP trace + dmesg.
 
 `PROGRESS.md` has the full run logs, the minimal-phase-4 breakdown, and the
 GATT DB map. Next: **Phase 1** — swap the debugfs knob for a real
