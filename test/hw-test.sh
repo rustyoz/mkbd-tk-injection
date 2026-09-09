@@ -23,7 +23,14 @@ DBG=/sys/kernel/debug/bluetooth/$HCI/le_legacy_oob_tk
 OUT=${OUT:-/tmp/mkbd-tkinj-$(date +%s)}
 
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
-[[ -e $DBG ]] || { echo "MISSING $DBG — not running the patched kernel"; exit 1; }
+if [[ ! -e $DBG ]]; then
+    echo "MISSING $DBG"
+    echo "The running bluetooth module is not the patched build."
+    echo "  sudo test/install-module.sh   then reboot   then re-run this."
+    KOA=$(cd "$(dirname "$0")/.." && pwd)/artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko
+    [[ -f $KOA ]] && echo "  (on disk now: $(modinfo -F srcversion bluetooth 2>/dev/null)  patched: $(modinfo -F srcversion "$KOA" 2>/dev/null))"
+    exit 1
+fi
 [[ -x $MKBD/bin/mkbd-provision ]] || { echo "no mkbd-provision at $MKBD"; exit 1; }
 
 strip_ansi() { sed -r 's/\x1B\[[0-9;]*[mK]//g'; }

@@ -1,6 +1,51 @@
 # Progress log
 
-## 2026-09-09 (later) — patched bluetooth.ko built for the RUNNING kernel; test blocked
+## 2026-09-09 (3) — live module swap won't work; install-to-disk + reboot instead
+
+The user ran `test/load-and-test.sh` (keyboard now attached, root available).
+Two attempts:
+
+1. `insmod` approach → `insmod: File exists` (EEXIST): the on-disk module is
+   auto-loadable and racing a hand `insmod`. Reworked the script to swap the
+   module **on disk** (`modules.dep` already points every consumer at
+   `updates/bluetooth.ko`) + `depmod` + normal `modprobe`.
+2. On-disk-swap approach → **`bluetooth` won't unload: refcnt 11, holder
+   `bnep`** (`modprobe -r bnep` fails — a BNEP/PAN interface or connection is
+   live). This is the user's daily-driver desktop with Bluetooth in active use.
+   A live unload of `bluetooth.ko` is not going to happen without tearing down
+   every BT connection and possibly the hci drivers.
+
+**Resolution: install the patched module to disk and reboot into it.** No
+rebuild — `artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko` already has vermagic
+`7.1.9-arch1-2`. Module-signature enforcement is off
+(`/sys/kernel/security/lockdown = [none]`; the unsigned `updates/bluetooth.ko`
+already loads), so an unsigned `.ko` loads fine at boot.
+
+New scripts:
+- `test/install-module.sh` — back up the current `updates/bluetooth.ko`, write
+  the patched build over it, `depmod`. Run as root, then **reboot**.
+- `test/uninstall-module.sh` — restore the backup, `depmod`. Then reboot.
+- `test/hw-test.sh` — now preflights that the running module is the patched
+  build and points at `install-module.sh` + reboot if not.
+- `test/load-and-test.sh` — kept for a machine where the stack *can* be
+  unloaded live, but expect it to fail on refcnt on a normal desktop.
+
+### To run the test (user)
+
+```bash
+cd ~/Work/mkbd-tk-injection
+sudo test/install-module.sh      # backs up + installs, prints next steps
+# reboot
+cat /sys/kernel/debug/bluetooth/hci0/le_legacy_oob_tk   # should exist (perm denied is fine)
+# plug in the Modern Keyboard, switch it on
+sudo test/hw-test.sh
+```
+
+Revert any time: `sudo test/uninstall-module.sh` then reboot.
+
+---
+
+## 2026-09-09 (2) — patched bluetooth.ko built for the RUNNING kernel; test blocked
 
 ### Done
 
