@@ -1,6 +1,6 @@
-From 14f2d631249cc40cbc485276d9a48749da10d563 Mon Sep 17 00:00:00 2001
+From 3f96cea7540c593f6904e157ee297f2de68e9edb Mon Sep 17 00:00:00 2001
 From: Russell Oliver <roliver8143@gmail.com>
-Date: Wed, 9 Sep 2026 23:06:39 +1000
+Date: Wed, 9 Sep 2026 23:56:35 +1000
 Subject: [PATCH] Bluetooth: SMP: inject LE legacy OOB Temporary Key via
  debugfs (PoC)
 
@@ -10,31 +10,31 @@ Works) or a 32-bit passkey.  NoInputNoOutput devices that mandate LE
 legacy OOB and reject every non-OOB Pairing Request (e.g. the Microsoft
 Modern Keyboard, model 1780) therefore cannot be paired at all.
 
-Add a per-adapter debugfs knob, le_legacy_oob_tk, that takes a peer
-address + address type + the 16-byte TK obtained out of band.  When an
-entry exists for the peer:
+Add a per-adapter debugfs knob, le_legacy_oob_tk, taking a peer address +
+address type + the 16-byte TK obtained out of band.  When an entry
+exists for the peer:
 
- - build_pairing_cmd() advertises OOB-present in our Pairing Request /
-   Response (devices like the above hang up otherwise);
- - get_auth_method() returns REQ_OOB so the 'can MITM be achieved?'
-   checks in the pairing handlers don't reject a NoInputNoOutput pair
-   before tk_request() runs;
+ - build_pairing_cmd() clears SMP_AUTH_SC (an SC-capable adapter sets it,
+   which would take the SC-OOB path) and sets oob_flag = SMP_OOB_PRESENT
+   in our Pairing Request; the device hangs up otherwise;
+ - get_auth_method() returns REQ_OOB so the "can MITM be achieved?"
+   checks don't reject a NoInputNoOutput pair before tk_request() runs;
  - tk_request() copies the TK into smp->tk, marks it valid and
    MITM-authenticated, and raises pending_sec_level to BT_SECURITY_HIGH.
 
-The legacy confirm/random state machine already consumes smp->tk
-directly, so nothing else changes.  REQ_OOB is only inspected elsewhere
-in Secure Connections code paths, which are not reached here.
+The legacy confirm/random state machine consumes smp->tk directly, so
+nothing else changes.  REQ_OOB is only inspected in Secure Connections
+code paths, which are not reached here.
 
-This is a proof of concept.  The upstreamable form carries the TK in
-struct oob_data via a new MGMT_OP_ADD_REMOTE_OOB_DATA field.
+Proof of concept.  The upstreamable form carries the TK in struct
+oob_data via a new MGMT_OP_ADD_REMOTE_OOB_DATA field.
 
 Not-Signed-off-by: Russell Oliver <roliver8143@gmail.com>
 ---
  net/bluetooth/hci_debugfs.c |   3 +
- net/bluetooth/smp.c         | 183 ++++++++++++++++++++++++++++++++++++
+ net/bluetooth/smp.c         | 187 ++++++++++++++++++++++++++++++++++++
  net/bluetooth/smp.h         |   3 +
- 3 files changed, 189 insertions(+)
+ 3 files changed, 193 insertions(+)
 
 diff --git a/net/bluetooth/hci_debugfs.c b/net/bluetooth/hci_debugfs.c
 index 0635e46..83ce2af 100644
@@ -51,7 +51,7 @@ index 0635e46..83ce2af 100644
  
  void hci_debugfs_create_conn(struct hci_conn *conn)
 diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
-index c447095..bf54a65 100644
+index c447095..0f20af9 100644
 --- a/net/bluetooth/smp.c
 +++ b/net/bluetooth/smp.c
 @@ -18,6 +18,7 @@
@@ -216,22 +216,26 @@ index c447095..bf54a65 100644
  /* These debug key values are defined in the SMP section of the core
   * specification. debug_pk is the public debug key and debug_sk the
   * private debug key.
-@@ -676,6 +824,14 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
- 		authreq &= ~SMP_AUTH_SC;
- 	}
+@@ -646,6 +794,18 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 	if (hci_dev_test_flag(hdev, HCI_PRIVACY))
+ 		local_dist |= SMP_DIST_ID_KEY;
  
-+	/* LE legacy OOB: advertise OOB-present in our Pairing Request/Response
-+	 * when userspace supplied a legacy Temporary Key for this peer.  Some
-+	 * NoInputNoOutput devices reject a pairing that does not set this.
++	/* LE legacy OOB: when userspace supplied a legacy Temporary Key for
++	 * this peer, force legacy pairing (clear SC) and advertise OOB-present.
++	 * This keyboard class does LE legacy OOB only and hangs up on a Pairing
++	 * Request that lacks the OOB flag; an SC-capable adapter otherwise has
++	 * SMP_AUTH_SC set here and would take the SC-OOB path instead.
 +	 */
-+	if (!(authreq & SMP_AUTH_SC) && hcon->type == LE_LINK &&
-+	    smp_le_legacy_oob_tk_get(&hcon->dst, hcon->dst_type, NULL))
++	if (hcon->type == LE_LINK &&
++	    smp_le_legacy_oob_tk_get(&hcon->dst, hcon->dst_type, NULL)) {
++		authreq &= ~SMP_AUTH_SC;
 +		oob_flag = SMP_OOB_PRESENT;
++	}
 +
- 	if (rsp == NULL) {
- 		req->io_capability = conn->hcon->io_capability;
- 		req->oob_flag = oob_flag;
-@@ -821,6 +977,16 @@ static u8 get_auth_method(struct smp_chan *smp, u8 local_io, u8 remote_io)
+ 	if (hci_dev_test_flag(hdev, HCI_SC_ENABLED) &&
+ 	    (authreq & SMP_AUTH_SC)) {
+ 		struct oob_data *oob_data;
+@@ -821,6 +981,16 @@ static u8 get_auth_method(struct smp_chan *smp, u8 local_io, u8 remote_io)
  	if (test_bit(SMP_FLAG_SC, &smp->flags))
  		return sc_method[remote_io][local_io];
  
@@ -248,7 +252,7 @@ index c447095..bf54a65 100644
  	return gen_method[remote_io][local_io];
  }
  
-@@ -837,6 +1003,23 @@ static int tk_request(struct l2cap_conn *conn, u8 remote_oob, u8 auth,
+@@ -837,6 +1007,23 @@ static int tk_request(struct l2cap_conn *conn, u8 remote_oob, u8 auth,
  	memset(smp->tk, 0, sizeof(smp->tk));
  	clear_bit(SMP_FLAG_TK_VALID, &smp->flags);
  

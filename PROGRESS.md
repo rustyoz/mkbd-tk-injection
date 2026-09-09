@@ -1,5 +1,44 @@
 # Progress log
 
+## 2026-09-09 (4) — first hardware run: keyboard hangs up. Root cause: SC bit. Fixed.
+
+Patched module installed via `install-module.sh` + reboot; `hw-test.sh` rerun
+(now `tk-pair.py` — the bash version parsed the local adapter address instead of
+the keyboard's and used `bluetoothctl pair`, which can't see a directed advert).
+
+**Result:** MGMT Pair Device → keyboard **connects, then immediately drops the
+link** — `connected=True`, `smp_seen=False`, MGMT disconnect reason 3 (remote
+terminated). Same signature as the documented non-OOB refusal.
+
+**Root cause:** `smp_conn_security()` sets `authreq |= SMP_AUTH_SC` on any
+SC-capable adapter, so our Pairing Request goes out with the SC bit. In
+`build_pairing_cmd()` the `if (HCI_SC_ENABLED && (authreq & SMP_AUTH_SC))` block
+is then taken (SC-OOB path, no legacy OOB data → `oob_flag` stays NOT_PRESENT),
+and the original patch's OOB-flag line was gated behind `!(authreq &
+SMP_AUTH_SC)` → skipped. Our Request: `AuthReq = SC|MITM|Bonding`, `OOB = not
+present` → keyboard hangs up (it does LE legacy OOB only).
+
+**Fix (patch updated):** in `build_pairing_cmd()`, *before* the SC block, when a
+legacy TK is stored for the peer: `authreq &= ~SMP_AUTH_SC` **and**
+`oob_flag = SMP_OOB_PRESENT`. Forces legacy + OOB, matching Windows (SC=0) and
+`mkbd-smp-pair`. `smp_send_pairing_req()` doesn't set `SMP_FLAG_SC` itself, and
+the initiator only sets it later from our own (now SC-cleared) preq, so the
+`!SMP_FLAG_SC` guards in `get_auth_method()` / `tk_request()` stay consistent.
+
+- `kernel/0001-*.patch` regenerated (3 files, +193). Applies clean to 7.1.9 and
+  7.2.3.
+- `artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko` rebuilt, srcversion
+  `8D68F14850CA9F6A0DFEF08`, vermagic `7.1.9-arch1-2`, compiles clean.
+
+Still unverified: TK byte order (`--tk-order as-is` first; `reversed` if
+`status 0x04` after Confirm — no reboot needed for that retry).
+
+**Next:** `sudo test/install-module.sh` (overwrites the earlier build) → reboot
+→ `sudo test/hw-test.sh`. Capture from the failed run:
+`/tmp/mkbd-tkinj-1788961915.btsnoop` (shows the SC/no-OOB Request + hangup).
+
+---
+
 ## 2026-09-09 (3) — live module swap won't work; install-to-disk + reboot instead
 
 The user ran `test/load-and-test.sh` (keyboard now attached, root available).
