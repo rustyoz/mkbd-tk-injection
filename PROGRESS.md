@@ -1,5 +1,79 @@
 # Progress log
 
+## 2026-09-10 (4) — END TO END: keyboard pairs, adopts its address, reconnects, types 🎉
+
+Two `hw-test.sh` runs (E2→E3, E3→E4), then `bluetoothctl connect`:
+
+- Phase 0: pair success, `key_type=1`, IRK 18A04D3E… — every run.
+- Phase 3: our `Identity Information` + `Identity Address 68:54:5A:D0:87:74`
+  go out (btmon `<` direction).
+- Phase 4 (`phase4.py`): L2CAP ATT connect (encrypted with the kernel LTK),
+  MTU, **full GATT discovery, 9 CCCD subscriptions** — then the keyboard drops
+  the link at ~7 s (`Disconnect … Reason: Remote User Terminated (0x13)`) as it
+  does while USB is attached. The LED/Feature-`0x24` writes **never got sent**
+  (`ConnectionResetError` first).
+- **`address adoption (F1 re-read): current_addr == the bonded F3 addr → ADOPTED`**
+  — both runs. The keyboard's per-bond counter advanced (E2→E3→E4), i.e. the
+  bond *completed on the keyboard side*.
+- `sudo modprobe uhid && bluetoothctl connect C9:6C:7E:E4:6C:7E`:
+  `Connection successful` → `Paired: yes  Bonded: yes  Trusted: yes
+  Connected: yes`, `Icon: input-keyboard`, `Battery Percentage: 87%`,
+  and dmesg: `hid-generic 0005:045E:0813…: input,hidraw5: BLUETOOTH HID v1.12
+  Keyboard … on 68:54:5a:d0:87:74`. **It reconnects on its own through normal
+  bluetoothd and the kernel creates the HID input device.**
+
+### What the minimal phase-4 actually is
+
+Combined with the session-3 result (host identity, *no* phase-4 GATT →
+HALF-BOND), the picture:
+
+| step | needed? |
+|---|---|
+| Phase-0 kernel legacy-OOB TK injection | yes |
+| Phase-3 host Identity Information + Identity Address (kernel patch) | yes |
+| Phase-4 **bonded GATT connection + discovery + the 9 CCCD subscribes**, held ~7 s until the keyboard drops it | **yes** |
+| Phase-4 LED write `0x0038`=`01` | **no** — never sent, still adopted |
+| Phase-4 Feature `0x0041` `E2 06 …` write + `0x0024` notification | **no** — never sent, still adopted |
+| explicit hold/reconnect NVM-flush round | not needed — the keyboard's own ~7 s hold then disconnect is the trigger |
+
+So: **the write sequence in `BOND-COMPLETION.md` is not load-bearing for
+address adoption.** What the keyboard needs post-SMP is a bonded ATT connection
+it can talk over briefly (CCCD subs at minimum) before it tears the link down.
+(2 data points — `phase4.py --no-writes` confirms; run pending.)
+
+### GATT DB (matches BOND-COMPLETION.md handles exactly)
+
+```
+svc 0x0001-0007 GAP | 0008 GATT | 0009-000e d4e3e3eb… (MS accessory)
+    000f-0013 DevInfo | 0014-0017 Battery | 0018-ffff HID (0x1812)
+MS accessory:  chr 0x000a props 1a val 0x000b 7d38d135…
+               chr 0x000d props 0a val 0x000e a8f04cfb…   (BOND-COMPLETION said 7d38d135@0x000e — it's a8f04cfb)
+HID reports:   notify (props 1a): val 0x001c/0020/0024/0028/002c/0030/0034, CCCDs 0x001d/0021/0025/0029/002d/0031/0035
+               out    (props 0e): val 0x0038/003b/003e     (0x0038 = LED / Report ID 1)
+               feat   (props 0a): val 0x0041/0044/0047/004a (0x0041 = Feature / Report ID 0x24)
+vendor CCCD 0x000c ; Battery CCCD 0x0017
+```
+
+### Fixes this round
+
+- `tk-pair.py`: `args.hci` string → int index for `_mgmt_cmd` (was an
+  AttributeError crash); stale-bond cleanup now silences the harmless
+  "Unpair … status 0x06 (not paired)".
+- `phase4.py`: the ~7 s keyboard drop is now expected — each step catches it and
+  returns instead of a traceback; `--no-writes` / `--no-msacc`; discovery only
+  on round 1; reports how long the keyboard held each connection.
+
+### Next
+
+1. Re-run to confirm `--no-writes` still adopts → lock in the minimal phase-4.
+2. Trim `phase4.py` to the confirmed-minimal sequence; drop the un-needed bits.
+3. **Phase 1**: replace the debugfs knob with a real `MGMT_OP_ADD_REMOTE_OOB_DATA`
+   `le_legacy_tk` field + a BlueZ D-Bus method (`PLAN.md`), and fold the
+   phase-3 `SMP_DIST_ID_KEY` + phase-4 CCCD dance into `mkbd-provision` proper
+   (or a new `mkbd-provision --native`).
+
+---
+
 ## 2026-09-10 (3) — host identity confirmed in phase 3; still HALF-BOND; phase4.py written
 
 Hardware run with the host-identity module:

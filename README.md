@@ -28,7 +28,8 @@ Full phased plan in [`PLAN.md`](PLAN.md) (copied from
 
 | Phase | Scope | State |
 |---|---|---|
-| **0** | debugfs knob in `smp.c`, prove the injection point on hardware | **✅ WORKS — authenticated LE legacy OOB bond via in-kernel SMP + injected TK, driven by MGMT Pair Device (2026-09-10)** |
+| **0** | kernel debugfs TK injection | ✅ works |
+| **4** | bonded GATT (CCCD subs + ~7s hold) → address adoption + reconnect | ✅ works end to end (2026-09-10) |
 | 1 | `MGMT_OP_ADD_REMOTE_OOB_DATA` `le_legacy_tk` field + BlueZ D-Bus method + `mkbd-provision` rewrite | not started |
 | 2 | kernel + BlueZ upstream submission | not started |
 
@@ -48,7 +49,34 @@ notes/
 build/                          (gitignored) kernel source tree, scratch
 ```
 
-## Status — 2026-09-10: Phase 0 validated on hardware
+## Status — 2026-09-10: END TO END ON HARDWARE 🎉
+
+Native Linux pairing **and reconnect** for the MS Modern Keyboard, no Windows,
+no `HCI_CHANNEL_USER`:
+
+1. **Phase 0** — patched `bluetooth.ko` (`kernel/0001-*.patch`): kernel SMP runs
+   LE legacy OOB with a debugfs-injected F3 TK; `build_pairing_cmd()` clears SC,
+   sets OOB-present, and offers `SMP_DIST_ID_KEY` so we distribute host identity
+   in phase 3. MGMT Pair Device → authenticated legacy LTK.
+2. **Phase 4** (`test/phase4.py`) — a bonded L2CAP ATT connection (encrypted
+   with the kernel LTK): GATT discovery + subscribe the 9 report/vendor CCCDs,
+   held until the keyboard drops it ~7 s later. That's enough — the keyboard
+   **adopts its generated address** (USB F1 confirms `current_addr` advanced).
+   The `BOND-COMPLETION.md` LED / Feature-`0x24` writes turned out **not** to be
+   needed.
+3. `bluetoothctl connect <addr>` then works through normal `bluetoothd` —
+   `Connected: yes, Bonded: yes`, `input-keyboard`, battery %, kernel HID input
+   device created.
+
+`sudo test/hw-test.sh` does 1→4 (Phase 0 pair + Phase 4 GATT + adoption check).
+
+`PROGRESS.md` has the full run logs, the minimal-phase-4 breakdown, and the
+GATT DB map. Next: **Phase 1** — swap the debugfs knob for a real
+`MGMT_OP_ADD_REMOTE_OOB_DATA` field + BlueZ D-Bus method (`PLAN.md`).
+
+---
+
+## Earlier — 2026-09-10: Phase 0 validated on hardware
 
 Patch `kernel/0001-*.patch` (vs linux-7.2.3; applies clean to linux-7.1.9).
 Built `artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko` for the running kernel,

@@ -152,12 +152,16 @@ def main():
             subprocess.run(["rm", "-rf", bond_dir], check=False)
             print(f":: removed stale bond dir {bond_dir}")
         try:
+            import contextlib
+            import io
             addr_le = m.bdaddr_to_bytes(addr, little_endian=True)
-            m._mgmt_cmd(m.MGMT_OP_UNPAIR_DEVICE,
-                        addr_le + bytes([m.MGMT_ADDR_LE_RANDOM, 1]), hci_index)
-            print(":: MGMT Unpair Device (cleared kernel bond)")
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf), contextlib.redirect_stdout(buf):
+                m._mgmt_cmd(m.MGMT_OP_UNPAIR_DEVICE,
+                            addr_le + bytes([m.MGMT_ADDR_LE_RANDOM, 1]), hci_index)
+            print(":: MGMT Unpair Device — cleared kernel bond")
         except SystemExit:
-            pass  # "not paired" is fine
+            print(":: MGMT Unpair Device — no existing kernel bond (fine)")
 
         btmon = subprocess.Popen(["btmon", "-w", snoop],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

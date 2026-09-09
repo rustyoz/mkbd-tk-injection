@@ -208,57 +208,73 @@ def connect_att(adapter: str, kbd: str, timeout=15.0, src_type=1, dst_type=2):
     raise last
 
 
+DROP = (ConnectionResetError, BrokenPipeError, OSError, IOError)
+
+
 def provision(att: ATT, token: int, args):
+    """Returns True if all steps ran, False if the keyboard dropped the link
+    partway (which is expected ~7 s in while USB is attached)."""
     print(":: subscribe CCCDs")
     for h in (args.cccd or CCCD_HANDLES):
         try:
             att.write_req(h, b"\x01\x00")
             print(f"   CCCD 0x{h:04x} <- 01 00  ok")
-        except IOError as e:
+        except DROP as e:
             print(f"   CCCD 0x{h:04x} : {e}")
+            return False
 
-    print(":: LED / Output write (handle 0x%04x)" % args.led)
-    for _ in range(args.led_writes):
-        att.write_cmd(args.led, b"\x01")
-        time.sleep(0.05)
-    print(f"   wrote 01 x{args.led_writes}")
+    if args.msacc is not None or not args.no_msacc:
+        print(":: read MS accessory vendor chars")
+        for h in (args.msacc or H_MSACC):
+            try:
+                print(f"   0x{h:04x} -> {att.read(h).hex()}")
+            except DROP as e:
+                print(f"   0x{h:04x} : {e}")
+                return False
 
-    body = struct.pack("<BBI", 0xE2, 0x06, token) + b"\x00" * 13
-    assert len(body) == 19
-    print(f":: Feature 0x24 write (handle 0x{args.feature:04x}) : {body.hex()}")
-    try:
-        att.write_req(args.feature, body)
-        print("   write ok")
-    except IOError as e:
-        print(f"   write FAILED: {e}")
-
-    # give the keyboard a moment to answer with its notification
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline and not any(h == H_NOTIFY or h == args.notify
-                                                  for h, _ in att.ntf):
+    if not args.no_writes:
+        print(":: LED / Output write (handle 0x%04x)" % args.led)
         try:
-            att.s.settimeout(0.5)
-            pkt = att.s.recv(512)
-            if pkt and pkt[0] == ATT_HANDLE_VALUE_NTF:
-                h = struct.unpack_from("<H", pkt, 1)[0]
-                att.ntf.append((h, pkt[3:]))
-        except (socket.timeout, TimeoutError):
-            pass
-        except OSError:
-            break
-    for h, v in att.ntf:
-        print(f"   NTF 0x{h:04x}: {v.hex()}")
-        if h in (H_NOTIFY, args.notify) and v[:1] == b"\xe2":
-            echoed = struct.unpack_from("<I", v, 4)[0] if len(v) >= 8 else None
-            print(f"       (token echo {echoed:#010x}, sent {token + 0x00010000:#010x}, "
-                  f"match={echoed == (token + 0x00010000)})")
+            for _ in range(args.led_writes):
+                att.write_cmd(args.led, b"\x01")
+                time.sleep(0.05)
+            print(f"   wrote 01 x{args.led_writes}")
+        except DROP as e:
+            print(f"   dropped: {e}")
+            return False
 
-    print(":: read MS accessory vendor chars")
-    for h in (args.msacc or H_MSACC):
+        body = struct.pack("<BBI", 0xE2, 0x06, token) + b"\x00" * 13
+        assert len(body) == 19
+        print(f":: Feature 0x24 write (handle 0x{args.feature:04x}) : {body.hex()}")
         try:
-            print(f"   0x{h:04x} -> {att.read(h).hex()}")
-        except IOError as e:
-            print(f"   0x{h:04x} : {e}")
+            att.write_req(args.feature, body)
+            print("   write ok")
+        except DROP as e:
+            print(f"   write dropped: {e}")
+            return False
+
+        # give the keyboard a moment to answer with its notification
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not any(
+                h in (H_NOTIFY, args.notify) for h, _ in att.ntf):
+            try:
+                att.s.settimeout(0.5)
+                pkt = att.s.recv(512)
+                if pkt and pkt[0] == ATT_HANDLE_VALUE_NTF:
+                    h = struct.unpack_from("<H", pkt, 1)[0]
+                    att.ntf.append((h, pkt[3:]))
+            except (socket.timeout, TimeoutError):
+                pass
+            except OSError:
+                break
+        for h, v in att.ntf:
+            print(f"   NTF 0x{h:04x}: {v.hex()}")
+            if h in (H_NOTIFY, args.notify) and v[:1] == b"\xe2":
+                echoed = struct.unpack_from("<I", v, 4)[0] if len(v) >= 8 else None
+                print(f"       (token echo {echoed:#010x}, "
+                      f"sent {token + 0x00010000:#010x}, "
+                      f"match={echoed == (token + 0x00010000)})")
+    return True
 
 
 def main():
@@ -276,6 +292,10 @@ def main():
     ap.add_argument("--led-writes", type=int, default=3)
     ap.add_argument("--cccd", type=lambda s: [int(x, 0) for x in s.split(",")])
     ap.add_argument("--msacc", type=lambda s: [int(x, 0) for x in s.split(",")])
+    ap.add_argument("--no-writes", action="store_true",
+                    help="skip the LED / Feature-0x24 writes (CCCD subs only)")
+    ap.add_argument("--no-msacc", action="store_true",
+                    help="skip the MS-accessory reads")
     ap.add_argument("--rounds", type=int, default=2,
                     help="connect/provision/hold/disconnect rounds (default 2)")
     args = ap.parse_args()
@@ -296,35 +316,43 @@ def main():
             time.sleep(3)
             continue
         att = ATT(s)
+        t_conn = time.monotonic()
         try:
             print(f":: MTU {att.exchange_mtu()}")
-            svcs, chars, descs = att.discover()
-            print(f":: discovered {len(svcs)} services, {len(chars)} chars, "
-                  f"{len(descs)} descriptors")
-            for h, end, u in svcs:
-                print(f"   svc 0x{h:04x}-0x{end:04x}  {_u(u)}")
-            for dh, pr, vh, u in chars:
-                print(f"   chr decl 0x{dh:04x} props 0x{pr:02x} val 0x{vh:04x}  {_u(u)}")
-            for h, u in descs:
-                if _u(u) in ("2902", "2908"):
-                    print(f"   dsc 0x{h:04x}  {_u(u)}")
-            provision(att, token, args)
+            if rnd == 1:
+                svcs, chars, descs = att.discover()
+                print(f":: discovered {len(svcs)} services, {len(chars)} chars, "
+                      f"{len(descs)} descriptors")
+                for h, end, u in svcs:
+                    print(f"   svc 0x{h:04x}-0x{end:04x}  {_u(u)}")
+                for dh, pr, vh, u in chars:
+                    print(f"   chr decl 0x{dh:04x} props 0x{pr:02x} "
+                          f"val 0x{vh:04x}  {_u(u)}")
+                for h, u in descs:
+                    if _u(u) in ("2902", "2908"):
+                        print(f"   dsc 0x{h:04x}  {_u(u)}")
+            done = provision(att, token, args)
             token += 0x00010000
-            print(f":: hold {args.hold:.0f}s")
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < args.hold:
-                try:
-                    s.settimeout(1.0)
-                    pkt = s.recv(512)
-                    if pkt and pkt[0] == ATT_HANDLE_VALUE_NTF:
-                        h = struct.unpack_from("<H", pkt, 1)[0]
-                        print(f"   NTF 0x{h:04x}: {pkt[3:].hex()}")
-                except (socket.timeout, TimeoutError):
-                    pass
-                except OSError:
-                    print("   link dropped by keyboard")
-                    break
+            if done:
+                print(f":: provisioning done; holding up to {args.hold:.0f}s "
+                      f"for the keyboard to drop the link")
+                t0 = time.monotonic()
+                while time.monotonic() - t0 < args.hold:
+                    try:
+                        s.settimeout(1.0)
+                        pkt = s.recv(512)
+                        if pkt and pkt[0] == ATT_HANDLE_VALUE_NTF:
+                            h = struct.unpack_from("<H", pkt, 1)[0]
+                            print(f"   NTF 0x{h:04x}: {pkt[3:].hex()}")
+                    except (socket.timeout, TimeoutError):
+                        pass
+                    except OSError:
+                        break
+        except DROP as e:
+            print(f"   round {rnd}: link dropped ({e})")
         finally:
+            held = time.monotonic() - t_conn
+            print(f":: round {rnd}: keyboard held the link {held:.1f}s")
             s.close()
         time.sleep(3)   # let the keyboard re-advertise before the next round
 
