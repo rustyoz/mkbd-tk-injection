@@ -12,5 +12,6 @@ BK="$TARGET.stock-backup"
 
 mv -f "$BK" "$TARGET"
 depmod -a "$KREL"
+rm -f /etc/modules-load.d/mkbd-uhid.conf
 echo "restored $TARGET from backup."
 echo "reboot to load the original module."

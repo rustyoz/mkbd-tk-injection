@@ -43,7 +43,10 @@ kernel/                         kernel patches (against linux-7.2.3)
   README.md                     how to apply / build / test
 bluez/                          BlueZ patches (Phase 1, empty for now)
 test/
-  hw-test.sh                    Phase 0 hardware test procedure
+  install-module.sh / uninstall-module.sh   swap the patched bluetooth.ko on disk (+ persist uhid); reboot
+  hw-test.sh                    end-to-end: Phase-0 pair -> phase4.py -> adoption check (thin wrapper)
+  tk-pair.py                    Phase-0 driver (F1/F2/F3 -> inject TK -> MGMT Pair Device -> bond)
+  phase4.py                    bonded GATT provisioning over raw L2CAP ATT
 notes/
   smp-codepaths.md              analysis of the kernel SMP paths the patch touches
 build/                          (gitignored) kernel source tree, scratch
@@ -59,16 +62,18 @@ no `HCI_CHANNEL_USER`:
    sets OOB-present, and offers `SMP_DIST_ID_KEY` so we distribute host identity
    in phase 3. MGMT Pair Device → authenticated legacy LTK.
 2. **Phase 4** (`test/phase4.py`) — a bonded L2CAP ATT connection (encrypted
-   with the kernel LTK): GATT discovery + subscribe the 9 report/vendor CCCDs,
-   held until the keyboard drops it ~7 s later. That's enough — the keyboard
-   **adopts its generated address** (USB F1 confirms `current_addr` advanced).
-   The `BOND-COMPLETION.md` LED / Feature-`0x24` writes turned out **not** to be
-   needed.
+   with the kernel LTK): subscribe the 9 report/vendor CCCDs, hold until the
+   keyboard drops it ~7 s later. That's the whole minimal sequence — the
+   keyboard then **adopts its generated address** (USB F1 confirms
+   `current_addr` advanced). The `BOND-COMPLETION.md` GATT discovery and the
+   LED / Feature-`0x24` writes turned out **not** to be needed (`--discover`
+   / `--writes` re-enable them).
 3. `bluetoothctl connect <addr>` then works through normal `bluetoothd` —
    `Connected: yes, Bonded: yes`, `input-keyboard`, battery %, kernel HID input
-   device created.
+   device created (`uhid` is auto-loaded by `install-module.sh`).
 
-`sudo test/hw-test.sh` does 1→4 (Phase 0 pair + Phase 4 GATT + adoption check).
+`sudo test/hw-test.sh` does 1→3 (Phase-0 pair + Phase-4 GATT + adoption check),
+~15 s. Add `--diag` for the btmon SMP trace + dmesg dump.
 
 `PROGRESS.md` has the full run logs, the minimal-phase-4 breakdown, and the
 GATT DB map. Next: **Phase 1** — swap the debugfs knob for a real

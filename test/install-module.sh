@@ -34,6 +34,11 @@ case "$TARGET" in
 esac
 depmod -a "$KREL"
 
+# uhid must be loaded for the kernel to build the HID input device on reconnect;
+# make it persistent so no `modprobe uhid` is needed after a reboot.
+echo uhid > /etc/modules-load.d/mkbd-uhid.conf
+modprobe uhid 2>/dev/null || true
+
 echo "installed patched bluetooth.ko at: $TARGET"
 sv_have=$(modinfo -F srcversion bluetooth); sv_want=$(modinfo -F srcversion "$KO")
 echo "  srcversion on disk now: $sv_have   (patched build: $sv_want)"

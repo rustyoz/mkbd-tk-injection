@@ -1,5 +1,37 @@
 # Progress log
 
+## 2026-09-10 (5) — trim to the minimal flow, cut the noise (post-v0.1.0)
+
+Locked in the minimal path from run (4) and stripped the scaffolding.
+
+**`phase4.py`** — default is now the confirmed-minimal sequence:
+- `--rounds 1` (was 2), no GATT discovery, no `0x0038`/`0x0041` writes, no
+  MS-accessory reads. Just: connect ATT → MTU → subscribe the 9 CCCDs → hold
+  until the keyboard drops (~7 s). ~8 s total, was ~25 s.
+- `--discover` / `--writes` / `--read-msacc` re-enable the extras;
+  `--cccd`, `--rounds`, `--hold` unchanged. Rewrote the ATT sweep helper so
+  discovery is one function instead of three copy-pasted loops.
+
+**`tk-pair.py`**:
+- btmon capture + the filtered SMP/dmesg dump are now `--diag` only (were
+  every run) — no btmon process, no ~3 s decode, ~40 fewer lines of output.
+- dropped the inline F1 adoption check — `phase4.py --f3-check` already prints
+  the ADOPTED / NOT verdict.
+- `--p4-rounds` default 1.
+
+**`install-module.sh`** now drops `/etc/modules-load.d/mkbd-uhid.conf` and
+`modprobe uhid`, so the HID input device is built on reconnect with no manual
+`modprobe`. `uninstall-module.sh` removes it.
+
+**Removed** `test/load-and-test.sh` — the live module-swap path never worked
+here (`bluetooth` refcnt 11, `bnep` holder); `install-module.sh` + reboot is
+the only route.
+
+Net: `sudo test/hw-test.sh` should now be ~15 s of mostly-silent work ending in
+a clear `ADOPTED` line, instead of ~45 s and a wall of btmon text.
+
+---
+
 ## 2026-09-10 (4) — END TO END: keyboard pairs, adopts its address, reconnects, types 🎉
 
 Two `hw-test.sh` runs (E2→E3, E3→E4), then `bluetoothctl connect`:

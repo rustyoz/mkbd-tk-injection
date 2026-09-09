@@ -92,11 +92,12 @@ def main():
     ap.add_argument("--addr-type", type=int, choices=(0, 1), default=1,
                     help="1 = LE random (static) [keyboard], 0 = public")
     ap.add_argument("--timeout", type=int, default=30)
-    ap.add_argument("--keep-btmon", action="store_true")
+    ap.add_argument("--diag", action="store_true",
+                    help="capture btmon + dump the filtered SMP trace and dmesg")
     ap.add_argument("--no-phase4", action="store_true",
                     help="stop after the Phase-0 pair; skip GATT provisioning")
-    ap.add_argument("--p4-rounds", type=int, default=2,
-                    help="phase-4 connect/provision/hold rounds (default 2)")
+    ap.add_argument("--p4-rounds", type=int, default=1,
+                    help="phase-4 connect/subscribe/hold rounds (default 1)")
     args = ap.parse_args()
 
     if os.geteuid() != 0:
@@ -163,9 +164,11 @@ def main():
         except SystemExit:
             print(":: MGMT Unpair Device — no existing kernel bond (fine)")
 
-        btmon = subprocess.Popen(["btmon", "-w", snoop],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(0.5)
+        if args.diag:
+            btmon = subprocess.Popen(["btmon", "-w", snoop],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+            time.sleep(0.5)
 
         tkb = tk[::-1] if args.tk_order == "reversed" else tk
         line = f"{addr} {args.addr_type} {tkb.hex()}"
@@ -226,48 +229,17 @@ def main():
                 btmon.kill()
         subprocess.run(["systemctl", "unmask", "bluetooth"], check=False)
         subprocess.run(["systemctl", "start", "bluetooth"], check=False)
-        _dump_diag(snoop)
-        print(f":: full capture  : sudo btmon -r {snoop}")
+        if args.diag:
+            _dump_diag(snoop)
+            print(f":: full capture  : sudo btmon -r {snoop}")
 
     if keys:
         time.sleep(2)
         subprocess.run(["bluetoothctl", "trust", res["new_addr"]], check=False)
-
-        # Address-adoption check: re-read F1 over USB. If the keyboard adopted
-        # the F3 address it just bonded (current_addr == new_addr, bond_exists),
-        # phase 3 (incl. host identity) was enough. If current_addr is still the
-        # old value it is a HALF-BOND -> phase-4 GATT + hold needed.
         print()
-        print("=== address adoption (F1 re-read) " + "=" * 32)
-        try:
-            fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
-            try:
-                st, d = m.col03_command(
-                    fd, 0xF1, m.bdaddr_to_bytes(adapter, little_endian=True))
-            finally:
-                os.close(fd)
-            if st == 0 and len(d) >= 7:
-                be = bool(d[0])
-                cur = m.bytes_to_bdaddr(d[1:7], little_endian=True)
-                print(f"  bond_exists={be}  current_addr={cur}")
-                print(f"  bonded this run={res['new_addr']}  was={res['current_addr']}")
-                if be and cur.upper() == res["new_addr"].upper():
-                    print("  ==> ADOPTED — full bond. phase 3 host identity was enough.")
-                elif be:
-                    print("  ==> HALF-BOND — bond flag set but address not adopted; "
-                          "phase-4 GATT + hold still needed.")
-                else:
-                    print("  ==> keyboard reports no bond (?)")
-            else:
-                print(f"  F1 re-read failed: status 0x{st:02x} ({len(d)} bytes)")
-        except Exception as e:
-            print(f"  F1 re-read error: {e} (power-cycle the keyboard and retry)")
-        print("=" * 66)
-
-        print()
-        print("Next: unplug USB, power-cycle the keyboard, then:")
-        print(f"  sudo modprobe uhid")
-        print(f"  bluetoothctl connect {res['new_addr']} ; bluetoothctl info {res['new_addr']}")
+        print("Next: unplug USB, power-cycle the keyboard —")
+        print(f"  bluetoothctl connect {res['new_addr']}   "
+              f"(or just wait; it is Trusted and reconnects on its own)")
         sys.exit(0)
     sys.exit(1)
 
