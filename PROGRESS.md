@@ -1,5 +1,27 @@
 # Progress log
 
+## 2026-09-10 (7) — REVERT the quiet refactor; it broke pairing
+
+`99ab527` ("quiet by default") broke the pair on hardware — `v0.1.0` and the
+`00be113` trim both work, `99ab527` does not. Suspect: the `phase4.run()` import
+refactor and/or `systemctl mask --runtime` (vs plain `mask --now`). Not worth
+bisecting the exact line.
+
+Restored `test/tk-pair.py` and `test/phase4.py` to their **`00be113`** (working)
+form: plain `systemctl mask --now` / `unmask`, `phase4.py` invoked as a
+subprocess (not imported), `--diag` opt-in for the btmon+dmesg dump.
+
+Kept: **`pairmodernkeyboard.sh`** (repo root) — now strictly a preflight wrapper
+(root / patched module / keyboard on USB) that `exec`s the unchanged `00be113`
+engine: `python3 test/tk-pair.py --hci hci0 "$@"`. `test/hw-test.sh` stubs to it.
+
+So `sudo ./pairmodernkeyboard.sh` == the known-good `sudo test/hw-test.sh` from
+`00be113`, plus preflight. Output is the `00be113` level (a dozen `::` lines,
+not a 6-line summary) — a quieter pass can come later, carefully, without
+touching the mask or the subprocess boundary.
+
+---
+
 ## 2026-09-10 (6) — one command: `pairmodernkeyboard.sh`, quiet by default
 
 Confirmed on hardware: the trimmed 1-round phase-4 still adopts. Packaged it.

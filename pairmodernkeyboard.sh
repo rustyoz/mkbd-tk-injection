@@ -3,10 +3,10 @@
 # Linux — Phase 0 (kernel legacy-OOB TK injection) + Phase 4 (bonded GATT), no
 # Windows, no HCI_CHANNEL_USER.
 #
-#   sudo ./pairmodernkeyboard.sh              # pair (quiet)
-#   sudo ./pairmodernkeyboard.sh -v           # verbose
+#   sudo ./pairmodernkeyboard.sh              # pair
 #   sudo ./pairmodernkeyboard.sh --diag       # + btmon SMP trace + dmesg
 #   sudo ./pairmodernkeyboard.sh --tk-order reversed
+#   sudo ./pairmodernkeyboard.sh --no-phase4  # stop after the Phase-0 pair
 #
 # Prereqs: root; patched bluetooth.ko loaded (test/install-module.sh + reboot);
 # the keyboard on USB (045e:0815), switched on; the modernkeyboard repo beside

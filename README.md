@@ -73,18 +73,9 @@ no `HCI_CHANNEL_USER`:
    `Connected: yes, Bonded: yes`, `input-keyboard`, battery %, kernel HID input
    device created (`uhid` is auto-loaded by `install-module.sh`).
 
-```
-$ sudo ./pairmodernkeyboard.sh
-Modern Keyboard  ·  adapter 68:54:5A:D0:87:74
-  USB handshake     C9:6C:7E:E5:6C:7E
-  pair              authenticated
-  provision         9/9 CCCDs, link held 7.1s
-  address adopted   yes
-
-Paired C9:6C:7E:E5:6C:7E. Unplug USB, power-cycle the keyboard — it reconnects on its own.
-```
-
-~15 s. `-v` for detail, `--diag` for the btmon SMP trace + dmesg.
+`sudo ./pairmodernkeyboard.sh` runs Phase 0 → Phase 4 → adoption check (~15 s).
+`--diag` adds the btmon SMP trace + dmesg; `--no-phase4` stops after the pair.
+(It is a preflight wrapper around `test/tk-pair.py` + `test/phase4.py`.)
 
 `PROGRESS.md` has the full run logs, the minimal-phase-4 breakdown, and the
 GATT DB map. Next: **Phase 1** — swap the debugfs knob for a real
