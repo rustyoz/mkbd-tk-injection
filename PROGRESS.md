@@ -1,5 +1,50 @@
 # Progress log
 
+## 2026-09-10 — PHASE 0 WORKS ON HARDWARE ✅
+
+`sudo test/hw-test.sh` after a keyboard power-cycle (the earlier `TimeoutError`
+on the USB ioctl / `connected=False` timeout were a cold/stuck BT radio — a
+power-cycle with USB still plugged fixes it):
+
+```
+pair status : success   events: [connected, new-irk, new-ltk, cmd-complete]
+LTK=9411727FA1196DADC505E542FE63AE68  EDIV=34314  Rand=4858899385762828146
+key_type=1 (authenticated legacy)  enc_size=16  IRK=18A04D3E2A836C1893F2A6EDADCFA43D
+bond: /var/lib/bluetooth/68:54:5A:D0:87:74/C9:6C:7E:E2:6C:7E/info
+```
+
+btmon confirmed the mechanism end to end:
+
+- our **Pairing Request**: `OOB present (0x01)`, AuthReq **0x21** = Bonding + CT2,
+  **no SC, no MITM** — the `build_pairing_cmd()` SC-clear + OOB-present fix works.
+- keyboard **Pairing Response**: OOB present, AuthReq 0x0d (offers MITM+SC);
+  legacy wins because our request had SC clear.
+- **Pairing Confirm ×2, Pairing Random ×2** — legacy `c1`/`s1` ran; the F3 TK
+  verified in **as-is** byte order (no `--tk-order reversed` needed), matching
+  the little-endian kernel `smp_c1` / mkbd-bumble-pair.
+- **Encryption Change: Success** — STK encryption.
+- **Encryption Information / Central Identification / Identity Information /
+  Identity Address Information** — keyboard distributed LTK + EDIV/Rand + IRK.
+- MGMT **New Long Term Key** (key_type 1 = authenticated) + **New IRK**.
+
+Driven entirely by **MGMT Pair Device** through the in-kernel Security Manager —
+no HCI_CHANNEL_USER, no Bumble, no userspace SMP.
+
+Byte order settled: debugfs knob takes the F3 TK **as-is**.
+
+### Still open — does the keyboard reconnect and type?
+
+The bond is written but this is a phase-3-only bond (no phase-4 vendor GATT
+provisioning, no hold/reconnect — see `../modernkeyboard/docs/BOND-COMPLETION.md`).
+Per that doc a phase-3-only bond can be a "half-bond": the keyboard sets its
+bond-exists byte but may not adopt the F3 address, so BlueZ can't reconnect.
+Next: unplug USB, power-cycle the keyboard, `bluetoothctl connect
+C9:6C:7E:E2:6C:7E`, `modprobe uhid`, verify `bluetoothctl info` + keystrokes.
+That question is orthogonal to TK injection — the win here is that the tail can
+now run through a normal bluetoothd instead of a controller seizure.
+
+---
+
 ## 2026-09-09 (4) — first hardware run: keyboard hangs up. Root cause: SC bit. Fixed.
 
 Patched module installed via `install-module.sh` + reboot; `hw-test.sh` rerun

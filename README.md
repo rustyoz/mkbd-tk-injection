@@ -28,7 +28,7 @@ Full phased plan in [`PLAN.md`](PLAN.md) (copied from
 
 | Phase | Scope | State |
 |---|---|---|
-| **0** | debugfs knob in `smp.c`, prove the injection point on hardware | **patch written; `bluetooth.ko` built for the running kernel (7.1.9-arch1-2); hardware test blocked on root + keyboard** |
+| **0** | debugfs knob in `smp.c`, prove the injection point on hardware | **✅ WORKS — authenticated LE legacy OOB bond via in-kernel SMP + injected TK, driven by MGMT Pair Device (2026-09-10)** |
 | 1 | `MGMT_OP_ADD_REMOTE_OOB_DATA` `le_legacy_tk` field + BlueZ D-Bus method + `mkbd-provision` rewrite | not started |
 | 2 | kernel + BlueZ upstream submission | not started |
 
@@ -48,17 +48,21 @@ notes/
 build/                          (gitignored) kernel source tree, scratch
 ```
 
-## Status — 2026-09-09
+## Status — 2026-09-10: Phase 0 validated on hardware
 
-Phase 0 patch (`kernel/0001-*.patch`) written against linux-7.2.3, also applies
-clean to **linux-7.1.9** (the running kernel). Compiles clean (`W=1`).
+Patch `kernel/0001-*.patch` (vs linux-7.2.3; applies clean to linux-7.1.9).
+Built `artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko` for the running kernel,
+installed via `test/install-module.sh` + reboot.
 
-A patched module for the **running** kernel is built:
-`artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko` (gitignored), vermagic
-`7.1.9-arch1-2`, loads without a reboot.
+`sudo test/hw-test.sh` → **`pair status: success`**, authenticated legacy LTK
+(`key_type=1`), bond written to `/var/lib/bluetooth/<adapter>/<addr>/info`. The
+in-kernel Security Manager ran LE legacy OOB SMP with the debugfs-injected F3
+TK, driven by MGMT Pair Device — no controller seizure. TK byte order: **as-is**.
+Full run + btmon breakdown in `PROGRESS.md`.
 
-**Hardware test not yet run** — blocked on: (1) root (no passwordless sudo),
-(2) the Modern Keyboard is not on the USB bus, (3) the running `bluetooth.ko` is
-an unidentified override under `/lib/modules/.../updates/` that my build would
-replace. To run once unblocked: `sudo test/load-and-test.sh`. Details in
-`PROGRESS.md`.
+Open: whether the keyboard reconnects/types on this phase-3-only bond (needs
+phase-4 GATT + hold per `modernkeyboard/docs/BOND-COMPLETION.md`) — orthogonal
+to TK injection.
+
+Next: **Phase 1** — move the TK from the debugfs knob to a real
+`MGMT_OP_ADD_REMOTE_OOB_DATA` field + a BlueZ D-Bus method (see `PLAN.md`).
