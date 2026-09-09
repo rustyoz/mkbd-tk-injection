@@ -36,7 +36,19 @@ fi
 strip_ansi() { sed -r 's/\x1B\[[0-9;]*[mK]//g'; }
 
 echo "== 1. USB F1/F2/F3 =="
-EX=$("$MKBD/bin/mkbd-provision" --exchange-only 2>&1 | strip_ansi | tee "$OUT.exchange")
+echo "  (keyboard on USB: $(lsusb 2>/dev/null | grep -iE '045e:081[0-9a-f]' || echo 'NOT SEEN'))"
+set +e
+"$MKBD/bin/mkbd-provision" --exchange-only 2>&1 | strip_ansi | tee "$OUT.exchange"
+rc=${PIPESTATUS[0]}
+set -e
+if [[ $rc -ne 0 ]]; then
+    echo
+    echo "mkbd-provision --exchange-only failed (exit $rc) — output above, saved to $OUT.exchange"
+    echo "likely: keyboard not on the vendor HID interface, or missing python deps"
+    echo "try:  cd $MKBD && sudo ./bin/mkbd-provision --exchange-only"
+    exit 1
+fi
+EX=$(cat "$OUT.exchange")
 ADDR=$(grep -oE '([0-9A-F]{2}:){5}[0-9A-F]{2}' <<<"$EX" | head -1)
 TK=$(grep -iE 'OOB TK' <<<"$EX" | grep -oE '[0-9A-Fa-f]{32}' | head -1)
 [[ -n $ADDR && -n $TK ]] || { echo "could not parse addr/TK from:"; echo "$EX"; exit 1; }
