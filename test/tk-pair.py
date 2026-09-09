@@ -195,10 +195,42 @@ def main():
     if keys:
         time.sleep(2)
         subprocess.run(["bluetoothctl", "trust", res["new_addr"]], check=False)
+
+        # Address-adoption check: re-read F1 over USB. If the keyboard adopted
+        # the F3 address it just bonded (current_addr == new_addr, bond_exists),
+        # phase 3 (incl. host identity) was enough. If current_addr is still the
+        # old value it is a HALF-BOND -> phase-4 GATT + hold needed.
         print()
-        print("Bond installed. The keyboard will not hold a BT link while USB is")
-        print("connected — unplug the cable, toggle its power switch, then:")
-        print(f"  bluetoothctl connect {res['new_addr']}")
+        print("=== address adoption (F1 re-read) " + "=" * 32)
+        try:
+            fd = os.open(node, os.O_RDWR | os.O_NONBLOCK)
+            try:
+                st, d = m.col03_command(
+                    fd, 0xF1, m.bdaddr_to_bytes(adapter, little_endian=True))
+            finally:
+                os.close(fd)
+            if st == 0 and len(d) >= 7:
+                be = bool(d[0])
+                cur = m.bytes_to_bdaddr(d[1:7], little_endian=True)
+                print(f"  bond_exists={be}  current_addr={cur}")
+                print(f"  bonded this run={res['new_addr']}  was={res['current_addr']}")
+                if be and cur.upper() == res["new_addr"].upper():
+                    print("  ==> ADOPTED — full bond. phase 3 host identity was enough.")
+                elif be:
+                    print("  ==> HALF-BOND — bond flag set but address not adopted; "
+                          "phase-4 GATT + hold still needed.")
+                else:
+                    print("  ==> keyboard reports no bond (?)")
+            else:
+                print(f"  F1 re-read failed: status 0x{st:02x} ({len(d)} bytes)")
+        except Exception as e:
+            print(f"  F1 re-read error: {e} (power-cycle the keyboard and retry)")
+        print("=" * 66)
+
+        print()
+        print("Next: unplug USB, power-cycle the keyboard, then:")
+        print(f"  sudo modprobe uhid")
+        print(f"  bluetoothctl connect {res['new_addr']} ; bluetoothctl info {res['new_addr']}")
         sys.exit(0)
     sys.exit(1)
 

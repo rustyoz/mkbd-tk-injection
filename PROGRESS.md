@@ -1,5 +1,40 @@
 # Progress log
 
+## 2026-09-10 (2) — toward phase-4: distribute host identity in phase 3
+
+Phase 0's bond had our Pairing Request offering `init_key_dist =
+ENC_KEY|SIGN` (no `ID_KEY`), so `smp_distribute_keys()` sent **no host
+Identity Information / Identity Address** — the kernel only offers `ID_KEY`
+under `HCI_PRIVACY`. `docs/BOND-COMPLETION.md` calls host identity in phase 3
+the one *proven-necessary* step for this keyboard to persist the bond and adopt
+its generated address (the only failed Windows round is the one that skipped
+it), and the bumble-pair half-bond note flags this as "the first thing to fix".
+
+**Patch updated:** the `build_pairing_cmd()` legacy-OOB block now also does
+`local_dist |= SMP_DIST_ID_KEY`. `smp_distribute_keys()` line ~1501 then sends
+`SMP_CMD_IDENT_INFO` (`hdev->irk`) + `SMP_CMD_IDENT_ADDR_INFO` (`hcon->src`)
+after the keyboard's. The keyboard's Pairing Response already carries `ikd`
+with the ID bit (per mkbd-smp-pair decode), so the negotiated set includes it.
+
+- `kernel/0001-*.patch` regenerated (+200 lines). Applies clean to 7.1.9/7.2.3.
+- Module rebuilt: `artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko`, srcversion
+  `57243BDC9EDF44569FEEFF7`, vermagic `7.1.9-arch1-2`, compiles clean.
+- `tk-pair.py` now does an **address-adoption check** after the bond: re-reads
+  F1 over USB and reports `ADOPTED` (current_addr == the bonded F3 addr) vs
+  `HALF-BOND` (bond flag set, address unchanged).
+
+Caveat: `hdev->irk` may be all-zeros without privacy; Windows sends a random
+IRK ("cosmetic" per BOND-COMPLETION.md). If the keyboard ignores a zero IRK,
+next step is to make the patch generate one.
+
+**Test:** `sudo test/install-module.sh` (new srcversion) → reboot →
+`sudo test/hw-test.sh`. The "address adoption" section says whether host
+identity alone closed the half-bond. If still HALF-BOND → build userspace
+phase-4 GATT (`0x0038=01` write is known; `0x0041` host-name payload is only
+partly reversed) + the ~7 s hold / reconnect.
+
+---
+
 ## 2026-09-10 — PHASE 0 WORKS ON HARDWARE ✅
 
 `sudo test/hw-test.sh` after a keyboard power-cycle (the earlier `TimeoutError`
