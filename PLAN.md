@@ -213,6 +213,10 @@ byte-level reference for comparing `btmon` output.
 
 ## Phase 2 — upstreaming (~weeks, async)
 
+> Full breakdown — patch series, interface decision, expected maintainer
+> pushback, the bluetoothd-masking angle, and a draft RFC cover letter:
+> **[`UPSTREAM.md`](UPSTREAM.md)**.
+
 1. **Kernel** → `linux-bluetooth@vger`. Patch set: `mgmt.h` UAPI + `mgmt.c` +
    `smp.c` + `hci_core.c` + `mgmt-api.txt` + selftest. Precedent: SC OOB
    (`MGMT_OP_ADD_REMOTE_OOB_DATA` 192/256 fields) landed the same shape.

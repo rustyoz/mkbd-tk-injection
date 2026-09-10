@@ -36,7 +36,9 @@ Full phased plan in [`PLAN.md`](PLAN.md) (copied from
 ## Layout
 
 ```
-PLAN.md                         the 3-phase plan
+PLAN.md                         the 3-phase plan (debugfs PoC -> MGMT field -> upstream)
+UPSTREAM.md                     turning the patch into a mainline series + RFC cover letter
+PLUGIN-PLAN.md                  packaging as an AUR / Omarchy install (DKMS + hooks + udev)
 PROGRESS.md                     dated worklog + current state + next actions
 kernel/                         kernel patches (against linux-7.2.3)
   0001-Bluetooth-SMP-inject-LE-legacy-OOB-Temporary-Key-via-.patch   Phase 0
