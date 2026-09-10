@@ -94,6 +94,10 @@ def main():
     ap.add_argument("--timeout", type=int, default=30)
     ap.add_argument("--diag", action="store_true",
                     help="capture btmon + dump the filtered SMP trace and dmesg")
+    ap.add_argument("--no-mask", action="store_true",
+                    help="do NOT mask/stop bluetooth.service during the pair "
+                         "(experiment: with the kernel patch a settled "
+                         "bluetoothd may not interfere)")
     ap.add_argument("--no-phase4", action="store_true",
                     help="stop after the Phase-0 pair; skip GATT provisioning")
     ap.add_argument("--p4-rounds", type=int, default=1,
@@ -138,16 +142,25 @@ def main():
     btmon = None
     keys = None
     # bluetoothd's adapter-init storm tears down SMP mid-flight; mask it like
-    # mkbd-provision --commit does, restore in finally.
-    subprocess.run(["systemctl", "mask", "--now", "bluetooth"], check=False)
-    subprocess.run(["systemctl", "stop", "bluetooth"], check=False)
+    # mkbd-provision --commit does, restore in finally. --no-mask skips this to
+    # test whether a settled bluetoothd interferes once the kernel is patched.
+    if not args.no_mask:
+        subprocess.run(["systemctl", "mask", "--now", "bluetooth"], check=False)
+        subprocess.run(["systemctl", "stop", "bluetooth"], check=False)
+    else:
+        print(":: --no-mask: leaving bluetooth.service running")
     try:
         m.mgmt_set_powered(True)
 
         # Clear any stale bond for this address: bluetoothd loads stored LTKs
         # into the kernel on boot, so MGMT Pair Device would return 0x13
-        # (Already Paired) and never re-run SMP. Remove the on-disk bond dir and
-        # tell the kernel to unpair.
+        # (Already Paired) and never re-run SMP. With bluetoothd running
+        # (--no-mask) also ask it to forget the device so it doesn't rewrite the
+        # dir or keep the LTK loaded.
+        if args.no_mask:
+            subprocess.run(["bluetoothctl", "remove", addr],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=False)
         bond_dir = f"/var/lib/bluetooth/{adapter}/{addr}"
         if os.path.isdir(bond_dir):
             subprocess.run(["rm", "-rf", bond_dir], check=False)
@@ -227,8 +240,9 @@ def main():
                 btmon.wait(3)
             except Exception:
                 btmon.kill()
-        subprocess.run(["systemctl", "unmask", "bluetooth"], check=False)
-        subprocess.run(["systemctl", "start", "bluetooth"], check=False)
+        if not args.no_mask:
+            subprocess.run(["systemctl", "unmask", "bluetooth"], check=False)
+            subprocess.run(["systemctl", "start", "bluetooth"], check=False)
         if args.diag:
             _dump_diag(snoop)
             print(f":: full capture  : sudo btmon -r {snoop}")
