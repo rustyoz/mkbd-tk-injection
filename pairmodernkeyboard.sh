@@ -12,7 +12,7 @@
 #
 # Prereqs: root; a patched bluetooth.ko loaded — test/install-module.sh (Phase 0)
 # or test/install-optionA-module.sh (Option A) + reboot; the keyboard on USB
-# (045e:0815), switched on; the modernkeyboard repo beside this one (or MKBD=/path).
+# (045e:0815), switched on. Uses this repo's vendored lib/mkbd_common.py.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 HCI=${HCI:-hci0}

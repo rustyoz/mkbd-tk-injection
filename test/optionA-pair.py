@@ -15,8 +15,8 @@ one exists — would use. No BlueZ patch exists yet (optionA/BLUEZ-NOTES.md is t
 spec), so this script talks to mgmt directly and bypasses bluetoothd, exactly like
 tk-pair.py does for Phase 0.
 
-Reuses the modernkeyboard repo's mkbd_common for the USB exchange and MGMT
-plumbing. Run as root.
+Uses this repo's vendored lib/mkbd_common.py (from the modernkeyboard repo)
+for the USB exchange and MGMT plumbing. Run as root.
 """
 import argparse
 import contextlib
@@ -27,19 +27,8 @@ import sys
 import time
 
 _here = os.path.dirname(os.path.abspath(__file__))
-MKBD = (os.environ.get("MKBD")
-        or next((p for p in (
-            os.path.join(_here, "..", "..", "modernkeyboard"),      # sibling checkout
-            os.path.expanduser("~/Work/modernkeyboard"),
-            os.path.expanduser(f"~{os.environ.get('SUDO_USER', '')}/Work/modernkeyboard"),
-        ) if os.path.isdir(os.path.join(p, "lib"))), "/nonexistent"))
-MKBD = os.path.abspath(MKBD)
-sys.path.insert(0, os.path.join(MKBD, "lib"))
-try:
-    import mkbd_common as m
-except ImportError as e:
-    sys.exit(f"cannot import mkbd_common from {MKBD}/lib: {e}\n"
-             f"  set MKBD=/path/to/modernkeyboard")
+sys.path.insert(0, os.path.join(_here, "..", "lib"))
+import mkbd_common as m  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Option A wire format — optionA/0001-Bluetooth-mgmt-accept-LE-legacy-OOB-TK.patch

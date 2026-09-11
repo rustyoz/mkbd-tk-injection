@@ -23,8 +23,7 @@ import sys
 import time
 
 _here = os.path.dirname(os.path.abspath(__file__))
-MKBD = os.environ.get("MKBD") or os.path.join(_here, "..", "..", "modernkeyboard")
-sys.path.insert(0, os.path.join(os.path.abspath(MKBD), "lib"))
+sys.path.insert(0, os.path.join(_here, "..", "lib"))
 import mkbd_common as m  # noqa: E402
 
 # ---- ATT ----------------------------------------------------------------

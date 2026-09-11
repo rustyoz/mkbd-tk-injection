@@ -135,17 +135,21 @@ retries against the same peer address in one boot while investigating (each
 attempt also risks the keyboard's own bond state — see
 `autopair/README.md` "The D-Bus pairing experiment").
 
-### Userspace bug found and fixed (not in this repo)
+### Userspace bug found and fixed
 
-`mkbd_common.mgmt_pair_device()` (sibling `modernkeyboard` repo,
-`lib/mkbd_common.py`) had a race: it treated `MGMT_OP_PAIR_DEVICE`'s Command
-Complete as terminal the instant it arrived, but on this kernel it can arrive
-*before* `MGMT_EV_NEW_LTK` — so a pairing that was actually completing
-correctly (full SMP exchange, real `Encryption Change: Success` in a `btmon`
-capture) got reported as `FAIL: no LTK distributed`. Fixed 2026-09-11 to keep
-listening for the LTK (with a short grace period for a following IRK)
-instead of trusting the premature success. This was likely responsible for
-at least one of the "failed" attempts in the same-boot-degradation story
-above actually having been a real pairing, misreported and then retried
-unnecessarily. Uncommitted in that repo as of this writing — a separate git
-history from this one.
+`mkbd_common.mgmt_pair_device()` had a race: it treated
+`MGMT_OP_PAIR_DEVICE`'s Command Complete as terminal the instant it arrived,
+but on this kernel it can arrive *before* `MGMT_EV_NEW_LTK` — so a pairing
+that was actually completing correctly (full SMP exchange, real
+`Encryption Change: Success` in a `btmon` capture) got reported as
+`FAIL: no LTK distributed`. Fixed 2026-09-11 to keep listening for the LTK
+(with a short grace period for a following IRK) instead of trusting the
+premature success. This was likely responsible for at least one of the
+"failed" attempts in the same-boot-degradation story above actually having
+been a real pairing, misreported and then retried unnecessarily.
+
+Found and fixed in the sibling `modernkeyboard` repo (committed there,
+`lib/mkbd_common.py` @ `fc2b8d98d0d6eb1fd9bc04795ba973975b6e723f`, separate
+git history from this one) and then vendored into `../lib/mkbd_common.py` in
+this repo so `test/*.py` no longer depends on a sibling checkout — see that
+file's header. Port future fixes from the canonical copy by hand.
