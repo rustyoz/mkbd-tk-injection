@@ -19,6 +19,18 @@
 > (NULL = none) rather than a flags argument. BlueZ work is specified in
 > `BLUEZ-NOTES.md`; no BlueZ patches were written because there is no BlueZ
 > source tree in this repo.
+>
+> **Userspace, for hardware end-to-end testing (2026-09-11).** Patches 1-4
+> also build clean against the *running* kernel (7.1.9-arch1-2, not just the
+> canonical 7.2.3) — recipe and status in `BUILD.md`, module staged at
+> `../artifacts/bluetooth-7.1.9-arch1-2-optionA.ko`. `test/optionA-pair.py`
+> drives the real `MGMT_OP_ADD_REMOTE_OOB_DATA` path directly (no BlueZ
+> patch exists yet, so it bypasses `bluetoothd` for the pair, same as Phase
+> 0's `test/tk-pair.py`); run it via `./pairmodernkeyboard.sh --option-a`.
+> `autopair/` wraps that into the full detect → prompt → pair → confirm →
+> prompt-disconnect → confirm-reconnect flow via a udev rule + systemd
+> service — see `autopair/README.md`. None of this has run against the
+> physical keyboard yet (module not installed/booted).
 
 This folder documents the plan to implement "Option A": extend the existing
 MGMT_OP_ADD_REMOTE_OOB_DATA command so that a third accepted payload length

@@ -1,0 +1,98 @@
+# Option A — building against the running kernel (7.1.9-arch1-2)
+
+The canonical five patches in this directory are written and verified against
+**linux-7.2.3** (see `PLAN.md`'s "as built" note and `build/optionA/linux-7.2.3`,
+a git tree with one commit per patch on a `linux-7.2.3 baseline` commit).
+
+For hardware end-to-end testing, the module has to match the *running* kernel
+(`uname -r` = `7.1.9-arch1-2` on this box, same constraint Phase 0 hit — see
+`../kernel/README.md`). This file is the recipe for that build; the resulting
+module is `../artifacts/bluetooth-7.1.9-arch1-2-optionA.ko`.
+
+## Recipe
+
+```bash
+cd build
+mkdir optionA-719 && cd optionA-719
+tar -xf ../linux-7.1.9.tar.xz
+cd linux-7.1.9
+git init -q && git add -A && git commit -q -m 'linux-7.1.9 baseline'
+git am ../../../optionA/0001-*.patch \
+       ../../../optionA/0002-*.patch \
+       ../../../optionA/0003-*.patch \
+       ../../../optionA/0004-*.patch
+# 0005 (selftest) does NOT apply here — see "Patch 5" below.
+
+cp /usr/lib/modules/7.1.9-arch1-2/build/Module.symvers .   # for a linkable .ko
+cp ../../linux-7.1.9/localversion.* .                       # -> vermagic 7.1.9-arch1-2, not 7.1.9+
+rm -rf .git                                                  # setlocalversion appends "+" for a dirty git tree
+cp ../../linux-7.1.9/.config .
+
+export PATH="$PWD/../../shim:$PATH"                          # `bc` shim: cats the installed kernel's
+                                                               # timeconst.h (no `pacman -S bc` needed)
+make -j"$(nproc)" olddefconfig
+make -j"$(nproc)" modules_prepare
+make -j"$(nproc)" M=net/bluetooth
+
+modinfo net/bluetooth/bluetooth.ko | grep -E 'vermagic|srcversion'
+# vermagic:  7.1.9-arch1-2 SMP preempt mod_unload   <- must match `uname -r`
+```
+
+Two things that are easy to get wrong and silently produce an unloadable or
+falsely-successful module:
+
+- **Missing `Module.symvers`** → `make M=net/bluetooth` compiles every `.o`
+  fine but modpost fails with a wall of `undefined!` errors and never produces
+  `bluetooth.ko`. This is the same "expected spew" `../kernel/README.md`
+  documents for the Phase 0 build; the fix is the same — copy
+  `Module.symvers` from `/usr/lib/modules/$(uname -r)/build/`.
+- **`vermagic` reads `7.1.9+` instead of `7.1.9-arch1-2`** → looks like a
+  successful build, but `insmod`/`install-module.sh` will refuse it (or worse,
+  load it into the wrong ABI). Cause: `scripts/setlocalversion` appends `+`
+  when it finds a git repository without the distro's
+  `localversion.05-arch` / `localversion.10-pkgrel` files that spell out the
+  `-arch1-2` suffix. Fix: copy those two files in, and build without a `.git`
+  present (or `git commit` a completely clean, tag-matching tree — copying
+  the files and dropping `.git` is simpler for a one-off build).
+
+## Patch 5 (selftest) does not apply to 7.1.9 as-is
+
+`git am` on `0005-Bluetooth-selftest-LE-legacy-OOB-vectors.patch` fails:
+
+```
+error: sha1 information is lacking or useless (net/bluetooth/smp.c).
+error: could not build fake ancestor
+```
+
+`git apply --3way` gets further but still fails — the real conflict is that
+`run_selftests()` in `net/bluetooth/smp.c` has a different signature between
+these two versions:
+
+| Tree | `run_selftests()` |
+|---|---|
+| 7.2.3 (patch written against) | `run_selftests(struct crypto_kpp *tfm_ecdh)` |
+| 7.1.9 (this tree) | `run_selftests(struct crypto_shash *tfm_cmac, struct crypto_kpp *tfm_ecdh)` |
+
+Patch 5 only touches this function to add one `test_le_legacy_oob()` call and
+its call site's context lines don't match. This is a portability gap in the
+selftest patch, not a functional problem — 1-4 (the actual mgmt/SMP behavior
+under test) applied and built clean on both kernels. Not fixed here because
+it's not needed for hardware end-to-end testing (that exercises the real SMP
+path over the air, not the boot-time selftest); fix it before submitting patch
+5 upstream against whatever tree that targets, by hand-adapting the
+`run_selftests()` call site to match.
+
+## Status
+
+- [x] Patches 1-4 apply cleanly to both linux-7.2.3 (canonical) and linux-7.1.9
+      (running kernel).
+- [x] `net/bluetooth/bluetooth.ko` links with the correct vermagic for
+      `7.1.9-arch1-2`, staged at `../artifacts/bluetooth-7.1.9-arch1-2-optionA.ko`.
+- [ ] **Not yet installed or booted.** `test/install-optionA-module.sh` stages
+      it to `/lib/modules/.../bluetooth.ko*` (with a backup) but needs a manual
+      reboot — not done from here.
+- [ ] **Not yet tested on real hardware.** `test/optionA-pair.py` (via
+      `pairmodernkeyboard.sh --option-a`) and the `autopair/` automation are
+      written and gated correctly (they fail closed with a clear message if
+      the running kernel doesn't accept the MGMT payload), but have not run
+      against the booted patched kernel + physical keyboard.

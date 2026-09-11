@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Auto-detect -> prompt -> pair -> confirm -> prompt-disconnect -> confirm-reconnect,
+# end to end, for the Microsoft Modern Keyboard over the Option A kernel path
+# (MGMT_OP_ADD_REMOTE_OOB_DATA, extended len-88 payload — see ../BLUEZ-NOTES.md
+# and ../PLAN.md). Meant to be started by udev (see 71-mkbd-optionA-autopair.rules
+# + mkbd-optionA-autopair.service) when the keyboard's vendor USB interface
+# (045e:0815, interface 0) appears; also fine to run by hand.
+#
+#   sudo optionA/autopair/mkbd-optionA-autopair
+#
+# Needs: root (mgmt socket + hidraw), the Option A patched bluetooth.ko booted
+# (test/install-optionA-module.sh + reboot), zenity + notify-send in the
+# logged-in graphical session, ../../pairmodernkeyboard.sh --option-a.
+#
+# This talks to whichever graphical session is logged in via `sudo -u`, using
+# that user's own systemd --user environment for DISPLAY / WAYLAND_DISPLAY /
+# DBUS_SESSION_BUS_ADDRESS. It does not assume a specific compositor or
+# notification daemon beyond zenity + libnotify being installed.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
+LOCK=/run/lock/mkbd-optionA-autopair.lock
+USB_MATCH='045e:081[0-9a-f]'
+RECONNECT_TIMEOUT=${RECONNECT_TIMEOUT:-90}
+
+[[ $EUID -eq 0 ]] || { echo "run as root" >&2; exit 1; }
+
+exec 9>"$LOCK"
+flock -n 9 || { echo "another mkbd-optionA-autopair is already running — exiting" >&2; exit 0; }
+
+log() { echo "[mkbd-optionA-autopair] $*" >&2; }
+
+# --------------------------------------------------------------------------- #
+# Find the logged-in graphical user and borrow their session environment, so
+# zenity/notify-send land on screen instead of failing silently as root.
+# --------------------------------------------------------------------------- #
+GUI_USER=$(loginctl list-sessions --no-legend 2>/dev/null \
+    | awk '$3!="root"{print $3; exit}')
+if [[ -z ${GUI_USER:-} ]]; then
+    log "no non-root graphical session found — cannot prompt; aborting"
+    exit 0
+fi
+GUI_UID=$(id -u "$GUI_USER")
+RUNTIME_DIR="/run/user/$GUI_UID"
+
+_env=$(sudo -u "$GUI_USER" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+       systemctl --user show-environment 2>/dev/null)
+WAYLAND_DISPLAY=$(sed -n 's/^WAYLAND_DISPLAY=//p' <<<"$_env")
+X_DISPLAY=$(sed -n 's/^DISPLAY=//p' <<<"$_env")
+DBUS_ADDR=$(sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' <<<"$_env")
+[[ -z $DBUS_ADDR ]] && DBUS_ADDR="unix:path=$RUNTIME_DIR/bus"
+
+run_as_user() {
+    sudo -u "$GUI_USER" \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        DBUS_SESSION_BUS_ADDRESS="$DBUS_ADDR" \
+        ${WAYLAND_DISPLAY:+WAYLAND_DISPLAY="$WAYLAND_DISPLAY"} \
+        ${X_DISPLAY:+DISPLAY="$X_DISPLAY"} \
+        "$@"
+}
+
+notify() { run_as_user notify-send "Modern Keyboard" "$1" ${2:+-u "$2"} 2>/dev/null || true; }
+ask()    { run_as_user zenity --question --title="Modern Keyboard" --width=360 --text="$1" 2>/dev/null; }
+info_box() { run_as_user zenity --info --title="Modern Keyboard" --width=360 --text="$1" 2>/dev/null || true; }
+error_box() { run_as_user zenity --error --title="Modern Keyboard" --width=360 --text="$1" 2>/dev/null || true; }
+
+# --------------------------------------------------------------------------- #
+# 1. Revalidate: is the vendor interface actually present right now? (udev can
+#    fire before userspace settles, or for the wrong interface.)
+# --------------------------------------------------------------------------- #
+if ! lsusb 2>/dev/null | grep -qiE "$USB_MATCH"; then
+    log "045e:081x not on USB — nothing to do"
+    exit 0
+fi
+
+# --------------------------------------------------------------------------- #
+# 2. Prompt to pair.
+# --------------------------------------------------------------------------- #
+log "keyboard detected on USB, prompting $GUI_USER"
+if ! ask "A Microsoft Modern Keyboard was plugged in.\n\nPair it over Bluetooth now?"; then
+    log "user declined"
+    exit 0
+fi
+
+# --------------------------------------------------------------------------- #
+# 3. Pair (Option A: MGMT_OP_ADD_REMOTE_OOB_DATA, extended payload).
+# --------------------------------------------------------------------------- #
+notify "Pairing…"
+LOG=$(mktemp /tmp/mkbd-optionA-autopair.XXXXXX.log)
+if "$REPO/pairmodernkeyboard.sh" --option-a >"$LOG" 2>&1; then
+    ADDR=$(sed -n 's/^Modern Keyboard  ·  //p' "$LOG" | head -1)
+    log "paired: $ADDR"
+    rm -f "$LOG"
+else
+    log "pairing failed, see $LOG"
+    error_box "Pairing failed.\n\n$(tail -5 "$LOG")\n\nFull log: $LOG"
+    exit 1
+fi
+
+if [[ -z ${ADDR:-} ]]; then
+    log "paired but could not parse the keyboard address from the log — skipping reconnect watch"
+    info_box "Keyboard paired.\n\nUnplug the USB cable now — it will reconnect over Bluetooth."
+    exit 0
+fi
+
+# --------------------------------------------------------------------------- #
+# 4. Prompt to disconnect USB, then confirm the Bluetooth reconnect.
+# --------------------------------------------------------------------------- #
+info_box "Keyboard paired ($ADDR).\n\nUnplug the USB cable now — it will reconnect automatically over Bluetooth."
+
+t=0
+while lsusb 2>/dev/null | grep -qiE "$USB_MATCH"; do
+    sleep 1; t=$((t + 1))
+    if (( t >= RECONNECT_TIMEOUT )); then
+        log "USB cable never unplugged within ${RECONNECT_TIMEOUT}s — giving up on the reconnect watch"
+        exit 0
+    fi
+done
+log "USB unplugged after ${t}s, watching for the Bluetooth reconnect"
+
+t=0
+while (( t < RECONNECT_TIMEOUT )); do
+    if bluetoothctl info "$ADDR" 2>/dev/null | grep -q '^\s*Connected: yes'; then
+        log "connected over Bluetooth after ${t}s"
+        notify "Connected over Bluetooth."
+        exit 0
+    fi
+    sleep 1; t=$((t + 1))
+done
+log "did not see a Bluetooth reconnect within ${RECONNECT_TIMEOUT}s"
+notify "Did not reconnect within ${RECONNECT_TIMEOUT}s — try: bluetoothctl connect $ADDR" critical
+exit 1
