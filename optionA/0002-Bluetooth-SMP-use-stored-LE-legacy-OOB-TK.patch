@@ -1,71 +1,135 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From b0365114245336643a0149d4a842848249064887 Mon Sep 17 00:00:00 2001
 From: Russell Oliver <roliver8143@gmail.com>
-Date: Fri, 11 Sep 2026 02:00:00 +0000
+Date: Fri, 11 Sep 2026 12:25:13 +1000
 Subject: [PATCH 2/5] Bluetooth: SMP: use a stored LE legacy OOB Temporary Key
 
-When a stored LE legacy OOB Temporary Key (TK) exists for a peer, use it
-in the in-kernel Security Manager Protocol (SMP) so pairing can complete
-without userspace needing to seize the controller (HCI_CHANNEL_USER).
+tk_request() can only produce a zero TK (Just Works) or a 32-bit passkey,
+so LE legacy OOB pairing has never been reachable even though the
+Security Manager implements everything else it needs.
 
-Conditions: link is LE, SMP Secure Connections is not active, and the
-stored oob entry has le_legacy_tk_present. In that case copy the 16-byte
-TK into smp->tk, mark SMP_FLAG_TK_VALID and SMP_FLAG_MITM_AUTH, raise the
-pending security level to BT_SECURITY_HIGH, and mark the SMP context as
-`oob_present` so build_pairing_cmd() advertises SMP_OOB_PRESENT.
+Consume the Temporary Key the previous patch lets userspace store in
+struct oob_data.  When one exists for the peer and this is not a Secure
+Connections pairing, copy it into smp->tk, select REQ_OOB and mark the
+pairing MITM-authenticated, raising pending_sec_level to
+BT_SECURITY_HIGH so the resulting LTK is stored as authenticated.  The
+legacy confirm/random state machine (smp_confirm()/smp_random()) already
+consumes smp->tk directly, so no further special casing is needed.
+REQ_OOB is otherwise only inspected on Secure Connections paths, which
+this cannot reach.
 
-Zero the stored TK and remove ephemeral entries on successful pairing; the
-local smp->tk copy is zeroed on completion to avoid lingering secret data.
+The key is single-use: once it has produced a bond smp_chan_destroy()
+wipes it from the stored oob_data with memzero_explicit().  It is
+deliberately kept on failure so a retry does not require userspace to
+feed the same key in again.
+
+The lookup runs in the same context as the existing
+hci_find_remote_oob_data() call in build_pairing_cmd() and follows the
+same locking convention as the rest of smp.c.
+
+On its own this is not yet enough to pair with a legacy-OOB-only
+peripheral: the Pairing Request still has to advertise OOB data and
+must not ask for Secure Connections.  That is the next patch.
 
 Signed-off-by: Russell Oliver <roliver8143@gmail.com>
 ---
-*** Begin Patch
-*** Update File: net/bluetooth/smp.c
-@@
- #include "hci_core.h"
- #include "smp.h"
-+#include "oob.h" /* hypothetical header for oob helpers */
-@@
- static void tk_request(struct smp *smp)
- {
-     struct hci_conn *hcon = smp->hcon;
-+    struct oob_data *oob = NULL;
+ net/bluetooth/smp.c | 63 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index c4470958b..ec716efe6 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -77,6 +77,7 @@ enum {
+ 	SMP_FLAG_REMOTE_OOB,
+ 	SMP_FLAG_LOCAL_OOB,
+ 	SMP_FLAG_CT2,
++	SMP_FLAG_LE_LEGACY_OOB,
+ };
  
-     /* existing validation and fallback logic */
--
--    /* existing logic to set smp->tk = 0 or passkey */
-+
-+    /* Try stored LE legacy OOB TK first (Option A behavior) */
-+    if (!(smp->flags & SMP_FLAG_SC) && hcon && hcon->type == LE_LINK) {
-+        oob = hci_remote_oob_data_lookup(hcon->hdev, &hcon->dst);
-+        if (oob && oob->le_legacy_tk_present) {
-+            memcpy(smp->tk, oob->le_legacy_tk, sizeof(oob->le_legacy_tk));
-+            smp->flags |= SMP_FLAG_TK_VALID | SMP_FLAG_MITM_AUTH;
-+            smp->pending_sec_level = BT_SECURITY_HIGH;
-+            smp->oob_present = 1; /* used by build_pairing_cmd() */
-+            /* TK is secret: do NOT log or emit its bytes */
-+            return;
-+        }
-+    }
-+
-+    /* existing fallback logic continues here: Just Works / passkey */
+ struct smp_dev {
+@@ -622,6 +623,30 @@ static __u8 seclevel_to_authreq(__u8 sec_level)
+ 	}
  }
-@@
- static void pairing_complete(struct smp *smp)
- {
-     /* existing completion handling */
-+    /* If we used a stored ephemeral OOB TK, remove it on success and zero */
-+    if (smp->hcon && smp->oob_present) {
-+        struct oob_data *oob = hci_remote_oob_data_lookup(smp->hcon->hdev,
-+                                                         &smp->hcon->dst);
-+        if (oob && oob->le_legacy_tk_present && !oob_is_persistent(oob)) {
-+            memzero_explicit(oob->le_legacy_tk, sizeof(oob->le_legacy_tk));
-+            oob->le_legacy_tk_present = 0;
-+            hci_remove_remote_oob_data(oob);
-+        }
-+    }
+ 
++/* Look up the LE legacy pairing Temporary Key userspace supplied out of band
++ * for this peer, or NULL if there is none.  Callers run in the same context as
++ * the existing hci_find_remote_oob_data() user in build_pairing_cmd().
++ */
++static struct oob_data *smp_le_legacy_oob_data(struct hci_conn *hcon)
++{
++	struct oob_data *data;
++	u8 bdaddr_type;
 +
-+    /* Zero local copy of TK in smp context to avoid later leakage */
-+    memzero_explicit(smp->tk, sizeof(smp->tk));
- }
-*** End Patch
-*** End Update
++	if (hcon->type != LE_LINK)
++		return NULL;
++
++	if (hcon->dst_type == ADDR_LE_DEV_PUBLIC)
++		bdaddr_type = BDADDR_LE_PUBLIC;
++	else
++		bdaddr_type = BDADDR_LE_RANDOM;
++
++	data = hci_find_remote_oob_data(hcon->hdev, &hcon->dst, bdaddr_type);
++	if (!data || !data->le_legacy_tk_present)
++		return NULL;
++
++	return data;
++}
++
+ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 			      struct smp_cmd_pairing *req,
+ 			      struct smp_cmd_pairing *rsp, __u8 authreq)
+@@ -731,6 +756,21 @@ static void smp_chan_destroy(struct l2cap_conn *conn)
+ 	complete = test_bit(SMP_FLAG_COMPLETE, &smp->flags);
+ 	mgmt_smp_complete(hcon, complete);
+ 
++	/* An LE legacy OOB Temporary Key is single-use: once it has produced
++	 * a bond there is no reason to keep it around, so wipe it.  It is
++	 * kept on failure so that a retry does not need userspace to feed the
++	 * same key in again.
++	 */
++	if (complete && test_bit(SMP_FLAG_LE_LEGACY_OOB, &smp->flags)) {
++		struct oob_data *data = smp_le_legacy_oob_data(hcon);
++
++		if (data) {
++			memzero_explicit(data->le_legacy_tk,
++					 sizeof(data->le_legacy_tk));
++			data->le_legacy_tk_present = false;
++		}
++	}
++
+ 	kfree_sensitive(smp->csrk);
+ 	kfree_sensitive(smp->responder_csrk);
+ 	kfree_sensitive(smp->link_key);
+@@ -837,6 +877,29 @@ static int tk_request(struct l2cap_conn *conn, u8 remote_oob, u8 auth,
+ 	memset(smp->tk, 0, sizeof(smp->tk));
+ 	clear_bit(SMP_FLAG_TK_VALID, &smp->flags);
+ 
++	/* If userspace supplied a 128-bit LE legacy pairing Temporary Key for
++	 * this peer out of band, use it.  It is the only MITM-capable method
++	 * available to a NoInputNoOutput pairing, and the legacy confirm /
++	 * random state machine consumes smp->tk directly, so nothing else
++	 * needs special casing.  Secure Connections has its own OOB path and
++	 * never reaches this.
++	 */
++	if (!test_bit(SMP_FLAG_SC, &smp->flags)) {
++		struct oob_data *data = smp_le_legacy_oob_data(hcon);
++
++		if (data) {
++			memcpy(smp->tk, data->le_legacy_tk, sizeof(smp->tk));
++			smp->method = REQ_OOB;
++			set_bit(SMP_FLAG_TK_VALID, &smp->flags);
++			set_bit(SMP_FLAG_MITM_AUTH, &smp->flags);
++			set_bit(SMP_FLAG_LE_LEGACY_OOB, &smp->flags);
++			if (hcon->pending_sec_level < BT_SECURITY_HIGH)
++				hcon->pending_sec_level = BT_SECURITY_HIGH;
++			bt_dev_dbg(hcon->hdev, "using LE legacy OOB TK");
++			return 0;
++		}
++	}
++
+ 	bt_dev_dbg(hcon->hdev, "auth:%u lcl:%u rem:%u", auth, local_io,
+ 		   remote_io);
+ 
+-- 
+2.55.0
+

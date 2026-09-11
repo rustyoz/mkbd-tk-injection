@@ -1,37 +1,51 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From e7c1d2a454824ab6df6cf56115bfb33e0f081060 Mon Sep 17 00:00:00 2001
 From: Russell Oliver <roliver8143@gmail.com>
-Date: Fri, 11 Sep 2026 02:00:00 +0000
-Subject: [PATCH 4/5] Bluetooth: SMP: distribute local identity for LE legacy OOB bonds
+Date: Fri, 11 Sep 2026 12:26:01 +1000
+Subject: [PATCH 4/5] Bluetooth: SMP: distribute local identity for LE legacy
+ OOB bonds
 
-For devices observed in the wild (e.g., Microsoft Modern Keyboard), the device
-will only persist the bond after the initiator distributes identity
-information. Make the kernel include ID key distribution for pairings that use a
-LE legacy OOB TK so these devices can persist bonds without manual workarounds.
+The kernel only offers SMP_DIST_ID_KEY - our IRK and Identity Address -
+when HCI_PRIVACY is enabled.  The peripherals that need LE legacy OOB
+expect it unconditionally: they only commit the bond to flash after the
+initiator has sent Identity Information and Identity Address Information
+in phase 3.  Without those PDUs the Microsoft Modern Keyboard (model
+1780) completes pairing, stores nothing, and never reconnects - the bond
+exists on the host side only.
 
-This change is limited to the OOB-legacy path (le_legacy_tk_present) and
-can be disabled later or gated behind a quirk.
+Add SMP_DIST_ID_KEY to the local key distribution when an LE legacy OOB
+Temporary Key is armed for the peer.  This is scoped to exactly the
+pairings the previous patch already forces to legacy OOB, so no other
+pairing starts distributing an identity it did not before, and the peer
+still decides what it actually asks for in its Pairing Response.
 
 Signed-off-by: Russell Oliver <roliver8143@gmail.com>
 ---
-*** Begin Patch
-*** Update File: net/bluetooth/smp.c
-@@
- void build_pairing_cmd(struct smp *smp, u8 *cmd)
- {
-     struct hci_conn *hcon = smp->hcon;
-     u8 authreq = smp->authreq;
-     u8 local_dist = smp->local_dist;
-+    struct oob_data *oob = NULL;
+ net/bluetooth/smp.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index 6bb9d3b4f..2c2350653 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -676,10 +676,18 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 	 * have OOB data.  An SC-capable adapter has SMP_AUTH_SC set here and
+ 	 * would otherwise take the Secure Connections OOB path below, which
+ 	 * needs P-256 confirm/random values the peer does not have.
++	 *
++	 * Also offer SMP_DIST_ID_KEY so we distribute our IRK and Identity
++	 * Address in phase 3.  Peripherals in this class only commit the bond
++	 * to flash once the initiator has sent Identity Information and
++	 * Identity Address Information; without them the bond exists on our
++	 * side only and the device never reconnects.  The kernel otherwise
++	 * offers the local identity only under HCI_PRIVACY.
+ 	 */
+ 	if (smp_le_legacy_oob_data(hcon)) {
+ 		authreq &= ~SMP_AUTH_SC;
+ 		oob_flag = SMP_OOB_PRESENT;
++		local_dist |= SMP_DIST_ID_KEY;
+ 	}
  
-+    /* If a legacy TK is present, include local Identity distribution so the
-+     * peer receives our Identity Information & Identity Address. This helps
-+     * devices that only persist a bond after the initiator sends identity. */
-+    if (hcon && hcon->type == LE_LINK) {
-+        oob = hci_remote_oob_data_lookup(hcon->hdev, &hcon->dst);
-+        if (oob && oob->le_legacy_tk_present)
-+            local_dist |= SMP_DIST_ID_KEY;
-+    }
-+
-     if (smp->oob_present)
-         authreq |= SMP_OOB_PRESENT;
-*** End Patch
+ 	if (hci_dev_test_flag(hdev, HCI_SC_ENABLED) &&
+-- 
+2.55.0
+

@@ -1,69 +1,238 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 7bd7b184fb71ed4f12f461549f39210b46eb54a2 Mon Sep 17 00:00:00 2001
 From: Russell Oliver <roliver8143@gmail.com>
-Date: Fri, 11 Sep 2026 02:00:00 +0000
+Date: Fri, 11 Sep 2026 12:28:16 +1000
 Subject: [PATCH 5/5] Bluetooth: selftest: LE legacy OOB SMP vectors
 
-Add SMP selftest vectors for LE legacy OOB based on captured vectors in
-this repo (lib/mkbd_crypto.py). This provides deterministic CI coverage.
+The existing CONFIG_BT_SELFTEST_SMP c1 and s1 cases use the single
+all-zero-key vector from Core Spec Vol 3 Part H D.1/D.2, which exercises
+neither a real Temporary Key nor the OOB Pairing Request/Response and
+address combination the preceding patches rely on.
 
-Add positive and negative tests:
-- Positive: correct TK leads to expected confirm values and STK.
-- Negative: incorrect TK yields failure/rejection.
+Add test_le_legacy_oob(), covering three LE legacy OOB pairings captured
+from hardware - a Microsoft Modern Keyboard (model 1780) pairing with a
+Windows host, recorded with a USB capture of the keyboard side and an HCI
+trace of the air side.  Each vector carries the 128-bit Temporary Key the
+keyboard reports in HID feature report 3, both Pairing Random and both
+Pairing Confirm values, the keyboard's random address, and for two of the
+three the resulting STK.  Every value is in the on-air little-endian order
+smp_c1() and smp_s1() work in, so the Temporary Key in the table is the
+feature report payload byte for byte - which is exactly the byte order
+MGMT_OP_ADD_REMOTE_OOB_DATA now takes.
 
-Add mgmt-tester cases to exercise the MGMT add_remote_oob_data extended payload:
-- success case (flags + 16-byte TK)
-- truncated-tk negative case (flags set but missing TK bytes)
-- insufficient privileges negative case.
+Each vector is checked three ways: both Pairing Confirm values must
+reproduce, s1() must reproduce the captured STK, and flipping a byte of
+the Temporary Key must *not* reproduce the Pairing Confirm, so a wrong
+key is guaranteed to fail the pairing rather than complete it
+unauthenticated.
 
 Signed-off-by: Russell Oliver <roliver8143@gmail.com>
 ---
-*** Begin Patch
-*** Add File: net/bluetooth/selftest_le_legacy_oob.c
-+/*
-+ * Selftest vectors for LE legacy OOB SMP pairing
-+ * (Vectors are taken from repo lib/mkbd_crypto.py and must be copy-pasted
-+ * exactly in byte order here.)
+ net/bluetooth/smp.c | 185 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 185 insertions(+)
+
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index 2c2350653..d4d0973e0 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -3595,6 +3595,185 @@ static int __init test_s1(void)
+ 	return 0;
+ }
+ 
++/* LE legacy OOB pairing vectors captured from hardware: a Microsoft Modern
++ * Keyboard (model 1780) pairing with a Windows host, recorded with a USB
++ * capture of the keyboard side plus an HCI trace of the air side.  Each entry
++ * holds the 128-bit Temporary Key the keyboard hands out in HID feature
++ * report 3, the Pairing Random and Pairing Confirm values the two sides
++ * exchanged, the keyboard's random address, and - where the capture covered
++ * phase 2 - the resulting STK.
++ *
++ * Every value is in the on-air little-endian order smp_c1() and smp_s1()
++ * operate in, so .tk is the feature report payload byte for byte.
++ *
++ * All three captures used the same public-address dongle as initiator and the
++ * same pair of Pairing PDUs, so preq/pres/ia are shared by test_le_legacy_oob()
++ * below.
 + */
-+#include <linux/module.h>
-+#include "smp.h"
-+#include "hci_core.h"
-+#include "selftest.h"
-+
-+/* Example vector — replace placeholders with the real bytes from repo */
-+static const u8 vec1_tk[16] = {
-+    0x12,0x34,0x56,0x78,0x9a,0xbc,0xde,0xf0,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88
++struct smp_le_legacy_oob_vector {
++	const char	*name;
++	u8		tk[16];
++	u8		mrand[16];
++	u8		srand[16];
++	u8		mconfirm[16];
++	u8		sconfirm[16];
++	bdaddr_t	ra;
++	bool		has_stk;
++	u8		stk[16];
 +};
-+static const u8 vec1_mrand[16] = { /* ... */ };
-+static const u8 vec1_srand[16] = { /* ... */ };
-+static const u8 vec1_expected_mconfirm[16] = { /* ... */ };
-+static const u8 vec1_expected_sconfirm[16] = { /* ... */ };
 +
-+static int __init le_legacy_oob_selftest_init(void)
++static const struct smp_le_legacy_oob_vector le_legacy_oob_vec[] __initconst = {
++	{
++		.name     = "modern keyboard 2",
++		.tk       = {
++			0xfe, 0x5a, 0x08, 0x62, 0x16, 0x28, 0x3f, 0xdb,
++			0x73, 0x9e, 0x07, 0x4a, 0x56, 0xb1, 0x29, 0x22,
++		},
++		.mrand    = {
++			0xc7, 0x00, 0x3d, 0x70, 0xfb, 0xac, 0xc2, 0xfe,
++			0xcf, 0x38, 0x6a, 0xe7, 0xa0, 0x37, 0x9b, 0x53,
++		},
++		.srand    = {
++			0x99, 0x71, 0x8d, 0xb1, 0x26, 0xe2, 0xf8, 0xe5,
++			0x48, 0xf9, 0xe6, 0x56, 0x32, 0x8b, 0xe2, 0x0d,
++		},
++		.mconfirm = {
++			0xbd, 0x04, 0x26, 0xdc, 0x2b, 0x7b, 0x86, 0x1f,
++			0x37, 0x32, 0xe1, 0xf4, 0x16, 0xdc, 0x29, 0x39,
++		},
++		.sconfirm = {
++			0x54, 0x76, 0x57, 0xf8, 0x01, 0xfb, 0xe2, 0xc8,
++			0xc0, 0x9a, 0xd7, 0x59, 0x91, 0x19, 0x72, 0xc2,
++		},
++		.ra       = { { 0x7e, 0x6c, 0xd6, 0x7e, 0x6c, 0xc9 } },
++		.has_stk  = true,
++		.stk      = {
++			0x8a, 0xb7, 0x09, 0x66, 0x5b, 0x8e, 0x55, 0xd2,
++			0xfa, 0x6c, 0xd0, 0x6c, 0xf9, 0xad, 0xcd, 0xd5,
++		},
++	},
++	{
++		.name     = "modern keyboard 3",
++		.tk       = {
++			0x9f, 0xf4, 0x6c, 0xa5, 0xa4, 0xb4, 0xbd, 0x78,
++			0xd9, 0xed, 0x70, 0x60, 0x1c, 0x5d, 0x45, 0x2f,
++		},
++		.mrand    = {
++			0xa6, 0x17, 0x9f, 0xdd, 0xc8, 0x83, 0x4f, 0x21,
++			0x60, 0xbb, 0x8b, 0xc0, 0x5a, 0x98, 0x7b, 0xea,
++		},
++		.srand    = {
++			0xa5, 0xce, 0xeb, 0x7a, 0x49, 0xe9, 0xfe, 0x9c,
++			0xc5, 0xca, 0x77, 0xf0, 0x56, 0x1f, 0x3d, 0x23,
++		},
++		.mconfirm = {
++			0xa7, 0x86, 0x29, 0x67, 0xd2, 0x55, 0x72, 0x96,
++			0x6f, 0x7f, 0xf9, 0x72, 0xcd, 0xcd, 0x8c, 0x59,
++		},
++		.sconfirm = {
++			0x95, 0x38, 0x7f, 0x47, 0xa1, 0x54, 0x96, 0xa3,
++			0x6f, 0xac, 0xce, 0x82, 0xa1, 0x7f, 0x14, 0xc3,
++		},
++		.ra       = { { 0x7e, 0x6c, 0xd9, 0x7e, 0x6c, 0xc9 } },
++	},
++	{
++		.name     = "mkbd-pairing-194414",
++		.tk       = {
++			0x93, 0x7d, 0x82, 0xe8, 0x18, 0xa6, 0x7f, 0x42,
++			0xa0, 0x84, 0x3f, 0x58, 0x51, 0x27, 0x6f, 0x20,
++		},
++		.mrand    = {
++			0x5d, 0xaf, 0x09, 0x14, 0x2b, 0xcc, 0xf3, 0x5e,
++			0x1d, 0x68, 0xa9, 0x6e, 0x2d, 0xa8, 0xad, 0xa2,
++		},
++		.srand    = {
++			0xd1, 0x38, 0x96, 0x75, 0xb9, 0x2c, 0x2b, 0x3e,
++			0x48, 0x37, 0xf4, 0x80, 0x7e, 0x42, 0x11, 0xd0,
++		},
++		.mconfirm = {
++			0x94, 0x39, 0x5d, 0x38, 0xe4, 0x2b, 0x1d, 0x0a,
++			0x8e, 0x36, 0xe2, 0x95, 0x17, 0x41, 0x3b, 0x6c,
++		},
++		.sconfirm = {
++			0x8c, 0x3d, 0x96, 0xd3, 0x4a, 0x85, 0x47, 0xd3,
++			0xef, 0x91, 0xc4, 0x34, 0x4f, 0xc2, 0x16, 0xb5,
++		},
++		.ra       = { { 0x7e, 0x6c, 0xda, 0x7e, 0x6c, 0xc9 } },
++		.has_stk  = true,
++		.stk      = {
++			0xf2, 0xd6, 0xbd, 0x82, 0x64, 0x02, 0x6e, 0x1d,
++			0xb4, 0x73, 0x24, 0x2b, 0x62, 0x5c, 0x43, 0x4c,
++		},
++	},
++};
++
++static int __init test_le_legacy_oob(void)
 +{
-+    int err;
++	/* IO 0x04, OOB present, AuthReq 0x05, key size 16 */
++	const u8 preq[7] = { 0x01, 0x04, 0x01, 0x05, 0x10, 0x06, 0x07 };
++	/* IO 0x03, OOB present, AuthReq 0x0d, key size 16 */
++	const u8 pres[7] = { 0x02, 0x03, 0x01, 0x0d, 0x10, 0x02, 0x03 };
++	const bdaddr_t ia = { { 0x8e, 0x0c, 0x04, 0x89, 0x44, 0xd8 } };
++	u8 res[16], bad_tk[16];
++	unsigned int i;
++	int err;
 +
-+    /* install an OOB entry simulating mgmt add_remote_oob_data with flags+TK */
-+    hci_add_remote_oob_data_direct(NULL /* hdev */, NULL /* addr */, 0 /* addr_type */,
-+                                  NULL, NULL, vec1_tk, 1 /* present */);
++	for (i = 0; i < ARRAY_SIZE(le_legacy_oob_vec); i++) {
++		const struct smp_le_legacy_oob_vector *v = &le_legacy_oob_vec[i];
 +
-+    /* run SMP pairing harness that uses stored OOB entry */
-+    err = run_smp_pairing_harness();
-+    if (err)
-+        return err;
++		err = smp_c1(v->tk, v->mrand, preq, pres, 0x00, &ia, 0x01,
++			     &v->ra, res);
++		if (err)
++			return err;
 +
-+    /* verify confirms and STK against expected values */
-+    if (!compare_confirm_values(vec1_expected_mconfirm, vec1_expected_sconfirm))
-+        return -EINVAL;
++		if (crypto_memneq(res, v->mconfirm, 16)) {
++			BT_ERR("%s: initiator confirm mismatch", v->name);
++			return -EINVAL;
++		}
 +
-+    /* negative case: wrong TK should fail */
-+    hci_add_remote_oob_data_direct(NULL, NULL, 0, NULL, NULL, (u8[]){0}, 1);
-+    if (!expect_pairing_failure())
-+        return -EIO;
++		err = smp_c1(v->tk, v->srand, preq, pres, 0x00, &ia, 0x01,
++			     &v->ra, res);
++		if (err)
++			return err;
 +
-+    pr_info("LE legacy OOB selftest passed\n");
-+    return 0;
++		if (crypto_memneq(res, v->sconfirm, 16)) {
++			BT_ERR("%s: responder confirm mismatch", v->name);
++			return -EINVAL;
++		}
++
++		/* A wrong Temporary Key must not reproduce the captured
++		 * Pairing Confirm - that is what makes the pairing fail
++		 * instead of silently succeeding unauthenticated.
++		 */
++		memcpy(bad_tk, v->tk, sizeof(bad_tk));
++		bad_tk[0] ^= 0xff;
++
++		err = smp_c1(bad_tk, v->mrand, preq, pres, 0x00, &ia, 0x01,
++			     &v->ra, res);
++		if (err)
++			return err;
++
++		if (!crypto_memneq(res, v->mconfirm, 16)) {
++			BT_ERR("%s: wrong TK still confirmed", v->name);
++			return -EINVAL;
++		}
++
++		if (!v->has_stk)
++			continue;
++
++		err = smp_s1(v->tk, v->srand, v->mrand, res);
++		if (err)
++			return err;
++
++		if (crypto_memneq(res, v->stk, 16)) {
++			BT_ERR("%s: STK mismatch", v->name);
++			return -EINVAL;
++		}
++	}
++
++	return 0;
 +}
 +
-+module_init(le_legacy_oob_selftest_init);
+ static int __init test_f4(void)
+ {
+ 	const u8 u[32] = {
+@@ -3798,6 +3977,12 @@ static int __init run_selftests(struct crypto_kpp *tfm_ecdh)
+ 		goto done;
+ 	}
+ 
++	err = test_le_legacy_oob();
++	if (err) {
++		BT_ERR("LE legacy OOB test failed");
++		goto done;
++	}
 +
-*** End Patch
+ 	err = test_f4();
+ 	if (err) {
+ 		BT_ERR("smp_f4 test failed");
+-- 
+2.55.0
+

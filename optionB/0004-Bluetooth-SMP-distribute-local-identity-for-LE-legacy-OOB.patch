@@ -1,0 +1,50 @@
+From d38d228f8b2832e9b08c9d0af1d22d3cd92e6486 Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 12:32:28 +1000
+Subject: [PATCH 4/5] Bluetooth: SMP: distribute local identity for LE legacy
+ OOB bonds
+
+The kernel only offers to distribute an IRK and Identity Address when
+HCI_PRIVACY is set.  Peers of the class that mandates LE legacy OOB do not
+treat the bond as established until the initiator has sent Identity
+Information and Identity Address Information in phase 3: without them the
+peer sets its "bonded" state but keeps advertising its factory address and
+never reconnects, so the pairing succeeds and is then useless.
+
+Offer SMP_DIST_ID_KEY when a stored LE legacy OOB Temporary Key is in use.
+The peer still has to request it - what gets distributed is the
+intersection of the initiator's and responder's key distribution fields -
+so a peer that does not ask for an IRK is unaffected.
+
+Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+ net/bluetooth/smp.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index 825f6e17a..4a6f6a879 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -726,9 +726,21 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 		 * userspace supplied a Temporary Key for this peer: a peer
+ 		 * that mandates LE legacy OOB rejects a Pairing Request whose
+ 		 * OOB flag is clear.
++		 *
++		 * Offer our identity as well.  The kernel otherwise only
++		 * distributes an IRK and Identity Address under HCI_PRIVACY,
++		 * but peers of this class treat the bond as incomplete until
++		 * the initiator has sent Identity Information and Identity
++		 * Address Information in phase 3, and then never reconnect.
++		 * What is actually distributed is the intersection of the two
++		 * key distribution fields, so this only widens what we are
++		 * willing to send; a peer that does not ask for an IRK still
++		 * does not get one.
+ 		 */
+-		if (smp_le_legacy_oob_get(hcon, NULL, NULL))
++		if (smp_le_legacy_oob_get(hcon, NULL, NULL)) {
+ 			oob_flag = SMP_OOB_PRESENT;
++			local_dist |= SMP_DIST_ID_KEY;
++		}
+ 	}
+ 
+ 	if (rsp == NULL) {

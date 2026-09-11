@@ -1,0 +1,90 @@
+From 8dd35a7a03434f77fd58a8bce0da47497a012db9 Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 12:31:40 +1000
+Subject: [PATCH 3/5] Bluetooth: SMP: force legacy pairing when an LE legacy
+ OOB TK is set
+
+A peer that mandates LE legacy OOB expects two things from the Pairing
+Request or Response it receives: the OOB flag set, and no offer of Secure
+Connections.  The Microsoft Modern Keyboard (model 1780) answers a request
+that offers Secure Connections with Pairing Failed, and answers one whose
+OOB flag is clear with Pairing Failed (OOB Not Available), so neither is
+optional.
+
+build_pairing_cmd() only ever sets the OOB flag for Secure Connections OOB.
+Set it for legacy pairing too when userspace supplied a Temporary Key for
+the peer, and clear the Secure Connections bit of AuthReq beforehand when
+the entry carries Force Legacy, so that an SC capable controller does not
+take the SC OOB path, which needs OOB data of a different kind.
+
+get_auth_method() has no OOB awareness at all: for legacy pairing it only
+consults gen_method[][], where NoInputNoOutput on both sides is JUST_WORKS.
+The MITM capability checks in smp_cmd_pairing_req() and
+smp_cmd_pairing_rsp() then reject the pairing with SMP_AUTH_REQUIREMENTS
+before tk_request() is reached.  Return REQ_OOB there when a Temporary Key
+is stored: LE legacy OOB is MITM capable regardless of IO capabilities.
+
+Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+ net/bluetooth/smp.c | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index 0bf97ca3c..825f6e17a 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -668,6 +668,7 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 	struct hci_conn *hcon = conn->hcon;
+ 	struct hci_dev *hdev = hcon->hdev;
+ 	u8 local_dist = 0, remote_dist = 0, oob_flag = SMP_OOB_NOT_PRESENT;
++	u8 oob_flags;
+ 
+ 	if (hci_dev_test_flag(hdev, HCI_BONDABLE)) {
+ 		local_dist = SMP_DIST_ENC_KEY | SMP_DIST_SIGN;
+@@ -683,6 +684,15 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 	if (hci_dev_test_flag(hdev, HCI_PRIVACY))
+ 		local_dist |= SMP_DIST_ID_KEY;
+ 
++	/* A Secure Connections capable controller offers Secure Connections
++	 * here, which would take the SC OOB path and needs OOB data this peer
++	 * does not have.  Drop back to legacy pairing when userspace asked for
++	 * it with Force Legacy.
++	 */
++	if (smp_le_legacy_oob_get(hcon, &oob_flags, NULL) &&
++	    (oob_flags & MGMT_LE_LEGACY_OOB_FLAG_FORCE_LEGACY))
++		authreq &= ~SMP_AUTH_SC;
++
+ 	if (hci_dev_test_flag(hdev, HCI_SC_ENABLED) &&
+ 	    (authreq & SMP_AUTH_SC)) {
+ 		struct oob_data *oob_data;
+@@ -711,6 +721,14 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 
+ 	} else {
+ 		authreq &= ~SMP_AUTH_SC;
++
++		/* Legacy pairing it is.  Announce that OOB data is present if
++		 * userspace supplied a Temporary Key for this peer: a peer
++		 * that mandates LE legacy OOB rejects a Pairing Request whose
++		 * OOB flag is clear.
++		 */
++		if (smp_le_legacy_oob_get(hcon, NULL, NULL))
++			oob_flag = SMP_OOB_PRESENT;
+ 	}
+ 
+ 	if (rsp == NULL) {
+@@ -876,6 +894,15 @@ static u8 get_auth_method(struct smp_chan *smp, u8 local_io, u8 remote_io)
+ 	if (test_bit(SMP_FLAG_SC, &smp->flags))
+ 		return sc_method[remote_io][local_io];
+ 
++	/* LE legacy OOB is MITM capable whatever the IO capabilities are.
++	 * Select it when userspace supplied a Temporary Key for this peer, so
++	 * that the "can MITM be achieved?" checks in smp_cmd_pairing_req() and
++	 * smp_cmd_pairing_rsp() do not reject a NoInputNoOutput pairing with
++	 * SMP_AUTH_REQUIREMENTS before tk_request() ever runs.
++	 */
++	if (smp->conn && smp_le_legacy_oob_get(smp->conn->hcon, NULL, NULL))
++		return REQ_OOB;
++
+ 	return gen_method[remote_io][local_io];
+ }
+ 
