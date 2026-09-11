@@ -8,9 +8,22 @@
 #
 #   sudo optionA/autopair/mkbd-optionA-autopair
 #
-# Needs: root (mgmt socket + hidraw), the Option A patched bluetooth.ko booted
-# (test/install-optionA-module.sh + reboot), zenity + notify-send in the
-# logged-in graphical session, ../../pairmodernkeyboard.sh --option-a.
+# Pairs via bluetoothd's own Adapter1.AddRemoteLegacyOOB() D-Bus method
+# (../../test/optionA-dbus-pair.py) instead of the raw mgmt socket, so
+# bluetoothd is never stopped/masked — every other Bluetooth device on the
+# adapter stays connected during a pair. Needs: root (hidraw + system D-Bus),
+# the Option A patched bluetooth.ko booted (test/install-optionA-module.sh +
+# reboot), the Option A patched bluetoothd installed and running
+# (test/install-optionA-bluetoothd.sh), zenity + notify-send in the logged-in
+# graphical session.
+#
+# This D-Bus path depends on BlueZ's normal discovery actually catching the
+# keyboard's short *directed* advertising window, which was unproven when
+# optionA-dbus-pair.py was written — see that script's docstring. If it turns
+# out discovery doesn't reliably see the device, this script will just fail
+# at step 3 with that exact diagnosis in the error dialog; reverting step 3 to
+# `pairmodernkeyboard.sh --option-a` (the raw-mgmt path, bluetoothd stopped
+# for the pair) is the fallback in that case.
 #
 # This talks to whichever graphical session is logged in via `sudo -u`, using
 # that user's own systemd --user environment for DISPLAY / WAYLAND_DISPLAY /
@@ -84,17 +97,18 @@ if ! ask "A Microsoft Modern Keyboard was plugged in.\n\nPair it over Bluetooth 
 fi
 
 # --------------------------------------------------------------------------- #
-# 3. Pair (Option A: MGMT_OP_ADD_REMOTE_OOB_DATA, extended payload).
+# 3. Pair via Adapter1.AddRemoteLegacyOOB() over D-Bus — bluetoothd stays up
+#    the whole time, unlike the raw-mgmt pairmodernkeyboard.sh --option-a path.
 # --------------------------------------------------------------------------- #
 notify "Pairing…"
 LOG=$(mktemp /tmp/mkbd-optionA-autopair.XXXXXX.log)
-if "$REPO/pairmodernkeyboard.sh" --option-a >"$LOG" 2>&1; then
-    ADDR=$(sed -n 's/^Modern Keyboard  ·  //p' "$LOG" | head -1)
+if python3 "$REPO/test/optionA-dbus-pair.py" >"$LOG" 2>&1; then
+    ADDR=$(sed -n 's/^[[:space:]]*keyboard addr (new bond)[[:space:]]*:[[:space:]]*//p' "$LOG" | head -1)
     log "paired: $ADDR"
     rm -f "$LOG"
 else
     log "pairing failed, see $LOG"
-    error_box "Pairing failed.\n\n$(tail -5 "$LOG")\n\nFull log: $LOG"
+    error_box "Pairing failed.\n\n$(tail -8 "$LOG")\n\nFull log: $LOG"
     exit 1
 fi
 
