@@ -1,0 +1,194 @@
+From 1863edd435ade10e6ac42d281db80e0be5025c8b Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 21:59:14 +1000
+Subject: [PATCH] Bluetooth: adapter: add AddRemoteLegacyOOB (Option A LE
+ legacy OOB TK)
+
+Adapter1.AddRemoteLegacyOOB(address, address_type, tk) forwards to the
+new 88-byte MGMT_OP_ADD_REMOTE_OOB_DATA payload optionA/0001 adds to the
+kernel (see mkbd-tk-injection/optionA/ in the sibling checkout): the
+existing extended (P-192+P-256) layout with a flags octet and a 16-byte
+LE legacy Security Manager Temporary Key appended.
+
+btd_adapter_add_remote_le_legacy_oob() mirrors the existing (BR/EDR)
+btd_adapter_add_remote_oob_data() exactly: fire the mgmt command, return
+-EIO only if it could not be queued. This keyboard's TK is single-use
+and self-contained by the time mkbd-provision has it (no agent round
+trip needed), so a plain adapter method needs no agent-capability
+negotiation, unlike an Agent1.RequestLegacyOOBKey() pull model.
+
+The TK is never logged (DBG() prints its presence, not its bytes) and
+D-Bus access follows the same default policy as every other Adapter1
+method (src/bluetooth.conf already allows any local process to call
+Pair() with no extra authorization layer in stock BlueZ - there is no
+polkit integration to hook into here, contrary to an earlier draft of
+this design that assumed one).
+---
+ lib/bluetooth/mgmt.h | 21 +++++++++++
+ src/adapter.c        | 87 ++++++++++++++++++++++++++++++++++++++++++++
+ src/adapter.h        |  5 +++
+ 3 files changed, 113 insertions(+)
+
+diff --git a/lib/bluetooth/mgmt.h b/lib/bluetooth/mgmt.h
+index 7fab3d7..5ea94ed 100644
+--- a/lib/bluetooth/mgmt.h
++++ b/lib/bluetooth/mgmt.h
+@@ -295,6 +295,27 @@ struct mgmt_cp_add_remote_oob_data {
+ 	uint8_t rand256[16];
+ } __packed;
+ 
++/* MGMT_OP_ADD_REMOTE_OOB_DATA also accepts a third, 88-byte payload: the
++ * layout above with a flags octet and a 16-byte LE legacy Security Manager
++ * Temporary Key appended. hash192/rand192 must stay zero (the TK is only
++ * meaningful on an LE identity) and addr.type must be an LE type; the kernel
++ * rejects anything else with INVALID_PARAMS. Old callers sending either size
++ * above are unaffected — the kernel switches on length, not a new opcode.
++ * Kernel side: ~/Work/mkbd-tk-injection optionA/0001-Bluetooth-mgmt-accept-LE-legacy-OOB-TK.patch.
++ */
++struct mgmt_cp_add_remote_oob_le_legacy_data {
++	struct mgmt_addr_info addr;
++	uint8_t hash192[16];
++	uint8_t rand192[16];
++	uint8_t hash256[16];
++	uint8_t rand256[16];
++	uint8_t flags;
++	uint8_t le_legacy_tk[16];
++} __packed;
++#define MGMT_ADD_REMOTE_OOB_LE_LEGACY_DATA_SIZE 88
++
++#define MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT	0x01
++
+ #define MGMT_OP_REMOVE_REMOTE_OOB_DATA	0x0022
+ struct mgmt_cp_remove_remote_oob_data {
+ 	struct mgmt_addr_info addr;
+diff --git a/src/adapter.c b/src/adapter.c
+index 538f63e..1622b30 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -3932,6 +3932,63 @@ bool btd_adapter_is_uuid_allowed(struct btd_adapter *adapter,
+ 		g_hash_table_contains(adapter->allowed_uuid_set, &uuid);
+ }
+ 
++static DBusMessage *add_remote_legacy_oob(DBusConnection *conn,
++					DBusMessage *msg, void *user_data)
++{
++	struct btd_adapter *adapter = user_data;
++	DBusMessageIter iter, array_iter;
++	const char *address, *address_type;
++	uint8_t *tk;
++	int tk_len;
++	bdaddr_t bdaddr;
++	uint8_t bdaddr_type;
++
++	dbus_message_iter_init(msg, &iter);
++
++	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_STRING)
++		return btd_error_invalid_args(msg);
++	dbus_message_iter_get_basic(&iter, &address);
++	dbus_message_iter_next(&iter);
++
++	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_STRING)
++		return btd_error_invalid_args(msg);
++	dbus_message_iter_get_basic(&iter, &address_type);
++	dbus_message_iter_next(&iter);
++
++	if (dbus_message_iter_get_arg_type(&iter) != DBUS_TYPE_ARRAY)
++		return btd_error_invalid_args(msg);
++	dbus_message_iter_recurse(&iter, &array_iter);
++	dbus_message_iter_get_fixed_array(&array_iter, &tk, &tk_len);
++
++	if (tk_len != 16)
++		return btd_error_invalid_args_str(msg,
++					"tk must be exactly 16 bytes");
++
++	if (str2ba(address, &bdaddr) < 0)
++		return btd_error_invalid_args(msg);
++
++	if (!strcmp(address_type, "public"))
++		bdaddr_type = BDADDR_LE_PUBLIC;
++	else if (!strcmp(address_type, "random"))
++		bdaddr_type = BDADDR_LE_RANDOM;
++	else
++		return btd_error_invalid_args_str(msg,
++			"address_type must be \"public\" or \"random\"");
++
++	if (!btd_adapter_get_powered(adapter))
++		return btd_error_not_ready(msg);
++
++	/* Never trace the TK. */
++	DBG("hci%d %s %s tk=<16 bytes>", adapter->dev_id, address,
++							address_type);
++
++	if (btd_adapter_add_remote_le_legacy_oob(adapter, &bdaddr,
++						bdaddr_type, tk) < 0)
++		return btd_error_failed(msg, "failed to add remote OOB data");
++
++	return dbus_message_new_method_return(msg);
++}
++
+ static const GDBusMethodTable adapter_methods[] = {
+ 	{ GDBUS_ASYNC_METHOD("StartDiscovery", NULL, NULL, start_discovery) },
+ 	{ GDBUS_METHOD("SetDiscoveryFilter",
+@@ -3946,6 +4003,11 @@ static const GDBusMethodTable adapter_methods[] = {
+ 	{ GDBUS_EXPERIMENTAL_ASYNC_METHOD("ConnectDevice",
+ 				GDBUS_ARGS({ "properties", "a{sv}" }), NULL,
+ 				connect_device) },
++	{ GDBUS_METHOD("AddRemoteLegacyOOB",
++			GDBUS_ARGS({ "address", "s" },
++				  { "address_type", "s" },
++				  { "tk", "ay" }), NULL,
++			add_remote_legacy_oob) },
+ 	{ }
+ };
+ 
+@@ -9203,6 +9265,31 @@ int btd_adapter_add_remote_oob_data(struct btd_adapter *adapter,
+ 	return -EIO;
+ }
+ 
++int btd_adapter_add_remote_le_legacy_oob(struct btd_adapter *adapter,
++					const bdaddr_t *bdaddr,
++					uint8_t bdaddr_type,
++					const uint8_t tk[16])
++{
++	struct mgmt_cp_add_remote_oob_le_legacy_data cp;
++	char addr[18];
++
++	ba2str(bdaddr, addr);
++	DBG("hci%d bdaddr %s type %u", adapter->dev_id, addr, bdaddr_type);
++
++	memset(&cp, 0, sizeof(cp));
++	bacpy(&cp.addr.bdaddr, bdaddr);
++	cp.addr.type = bdaddr_type;
++	cp.flags = MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT;
++	memcpy(cp.le_legacy_tk, tk, sizeof(cp.le_legacy_tk));
++
++	if (mgmt_send(adapter->mgmt, MGMT_OP_ADD_REMOTE_OOB_DATA,
++				adapter->dev_id, sizeof(cp), &cp,
++				NULL, NULL, NULL) > 0)
++		return 0;
++
++	return -EIO;
++}
++
+ int btd_adapter_remove_remote_oob_data(struct btd_adapter *adapter,
+ 							const bdaddr_t *bdaddr)
+ {
+diff --git a/src/adapter.h b/src/adapter.h
+index 4e07f71..35b98fa 100644
+--- a/src/adapter.h
++++ b/src/adapter.h
+@@ -228,6 +228,11 @@ int btd_adapter_add_remote_oob_data(struct btd_adapter *adapter,
+ 					const bdaddr_t *bdaddr,
+ 					uint8_t *hash, uint8_t *randomizer);
+ 
++int btd_adapter_add_remote_le_legacy_oob(struct btd_adapter *adapter,
++					const bdaddr_t *bdaddr,
++					uint8_t bdaddr_type,
++					const uint8_t tk[16]);
++
+ int btd_adapter_remove_remote_oob_data(struct btd_adapter *adapter,
+ 							const bdaddr_t *bdaddr);
+ 
+-- 
+2.55.0
+

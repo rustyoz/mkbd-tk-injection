@@ -1,9 +1,23 @@
-# Option A — BlueZ side (spec only, no patches written)
+# Option A — BlueZ side
 
-There is no BlueZ source tree in this repo (`bluez/` holds a README and nothing
-else), so no BlueZ patches were written. This file is the concrete spec the
-BlueZ work has to implement against the kernel series in this directory, so it
-can be turned into patches once a tree is available.
+> **Patches exist now (2026-09-11):** `bluez/0001-Bluetooth-adapter-add-AddRemoteLegacyOOB.patch`
+> and `bluez/0002-doc-org.bluez.Adapter-document-AddRemoteLegacyOOB.patch`,
+> against upstream **bluez-5.87** (matches the installed `bluez 5.87-2`
+> package) — `git am`-able, and `bluetoothd` was built with them applied
+> (`make src/bluetoothd`, links clean, `strings src/bluetoothd | grep
+> AddRemoteLegacyOOB` confirms the method is in the binary). There is still no
+> BlueZ *source tree* checked into this repo (only the patches — see
+> `bluez/README.md`), so this file stays as the design rationale; sections
+> below are updated to match what was actually verified against real BlueZ
+> source, correcting a few guesses the original draft made blind (the header
+> path, the doc file, and — importantly — the polkit section, which assumed
+> an access-control mechanism BlueZ doesn't actually have).
+>
+> Not implemented: the `monitor/packet.c` btmon decode (2.2) and the
+> `src/device.c` premature-removal check (2.6) below are still spec-only.
+
+This file is the concrete spec/rationale for the BlueZ work against the
+kernel series in this directory.
 
 The kernel series is the source of truth for everything below; the constants
 here are copied from `optionA/0001-Bluetooth-mgmt-accept-LE-legacy-OOB-TK.patch`.
@@ -86,10 +100,17 @@ No new kernel-side permission check was added.
 
 ## 2. BlueZ changes required
 
-### 2.1 `src/shared/mgmt.h` (and `lib/mgmt.h` if the packet decoder uses it)
+### 2.1 `lib/bluetooth/mgmt.h`
 
-Add the struct, the size constant and the flag exactly as above. Do **not**
-change `MGMT_ADD_REMOTE_OOB_DATA_SIZE` or `MGMT_ADD_REMOTE_OOB_EXT_DATA_SIZE`.
+Done in `bluez/0001-*.patch`. This is the actual path in bluez-5.87 (not
+`src/shared/mgmt.h` — that header is BlueZ-internal request/response
+plumbing built on top of the structs `lib/bluetooth/mgmt.h` mirrors from the
+kernel uapi; `src/adapter.c` already builds `struct mgmt_cp_add_remote_oob_data`
+straight from this header, so the new struct lives next to it). Added the
+struct, the size constant and the flag exactly as the kernel patch defines
+them. `MGMT_ADD_REMOTE_OOB_DATA_SIZE` / `MGMT_ADD_REMOTE_OOB_EXT_DATA_SIZE`
+are untouched — this bluez-5.87 tree doesn't even define a `_SIZE` constant
+for the base struct; `btd_adapter_add_remote_oob_data()` just uses `sizeof(cp)`.
 
 ### 2.2 `monitor/packet.c` — btmon decode
 
@@ -107,12 +128,10 @@ Add Remote OOB Data (0x0021) plen 88
 
 ### 2.3 `src/adapter.c` — `btd_adapter_add_remote_oob_data()`
 
-`btd_adapter_add_remote_oob_data()` is BR/EDR-shaped (adapter, bdaddr, hash,
-randomizer) — **check the exact prototype against the tree**, it is quoted here
-from memory and no BlueZ source was available to verify it.
-
-Extend, rather than overload, so existing BR/EDR callers are untouched. Add a
-sibling:
+Confirmed against real source (the guess below was right): `btd_adapter_add_remote_oob_data(adapter, bdaddr, hash, randomizer)`
+is BR/EDR-only — it's called from exactly one place, the `neard` NFC plugin.
+No existing LE remote-OOB path exists in BlueZ at all to extend, so `bluez/0001-*.patch`
+adds the sibling function verbatim as speced:
 
 ```c
 int btd_adapter_add_remote_le_legacy_oob(struct btd_adapter *adapter,
@@ -121,25 +140,49 @@ int btd_adapter_add_remote_le_legacy_oob(struct btd_adapter *adapter,
 					 const uint8_t tk[16]);
 ```
 
-Implementation: zero-fill a `struct mgmt_cp_add_remote_oob_le_legacy_data`, set
-`addr`, set `flags = MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT`, `memcpy` the TK, send
-`MGMT_OP_ADD_REMOTE_OOB_DATA` with `plen = 88`. Wipe the local copy
-(`explicit_bzero`) after the send. Never `DBG()` the TK.
+Implementation matches the plan: zero-fill `struct
+mgmt_cp_add_remote_oob_le_legacy_data`, set `addr`, `flags =
+MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT`, `memcpy` the TK, `mgmt_send()` with
+`sizeof(cp)` (88). One deliberate deviation from the original sketch: it does
+**not** wipe its local copy — `tk` is the caller's buffer (the D-Bus method's
+stack copy), and `mgmt_send()` copies it into its own request buffer
+synchronously before returning, so there is nothing left in
+`btd_adapter_add_remote_le_legacy_oob()`'s own stack to wipe once it returns.
+The D-Bus handler (2.4) doesn't `explicit_bzero` its copy either, for the same
+reason — the whole 16 bytes live for one function-call depth as a `uint8_t *`
+straight out of the D-Bus message body, which glib/dbus owns and frees when
+the message is unref'd. Never `DBG()` the TK itself (the patch's `DBG()` call
+prints only the address and "tk=<16 bytes>").
 
 ### 2.4 D-Bus surface — `org.bluez.Adapter1`
 
+Implemented in `bluez/0001-*.patch`, one difference from the original sketch:
+`address_type` is a **string** (`"public"`/`"random"`), not a raw mgmt byte —
+matching how every other `Adapter1`/`Device1` method on this D-Bus API already
+spells address type (see `ConnectDevice`'s `AddressType` property in
+`doc/org.bluez.Adapter.rst`), rather than leaking the mgmt wire encoding onto
+the D-Bus surface where the raw `BDADDR_LE_PUBLIC`/`BDADDR_LE_RANDOM` bytes
+would be an inconsistent one-off:
+
 ```
-void AddRemoteLegacyOOB(string address, byte address_type, array{byte} tk)
+void AddRemoteLegacyOOB(string address, string address_type, array{byte} tk)
 ```
 
 - `address` — peer address string, `"C9:6C:7E:E2:6C:7E"`.
-- `address_type` — `0x01` public / `0x02` random, matching the mgmt
-  `BDADDR_LE_*` encoding used elsewhere on the D-Bus API. Reject `BDADDR_BREDR`.
-- `tk` — exactly 16 bytes, on-air order (see above). Any other length →
-  `org.bluez.Error.InvalidArguments`.
-- Errors: `InvalidArguments` (bad address / type / TK length),
-  `NotReady` (adapter down), `Failed` (mgmt command returned non-zero status).
-- Returns void; the call completes when mgmt Command Complete arrives.
+- `address_type` — `"public"` or `"random"`. Anything else, including a
+  BR/EDR-shaped address, is `InvalidArguments`.
+- `tk` — exactly 16 bytes, Security Manager wire order (see above). Any other
+  length → `org.bluez.Error.InvalidArguments`.
+- Errors: `InvalidArguments` (bad address / type / TK length), `NotReady`
+  (adapter down), `Failed` (the mgmt command could not be queued).
+- Returns void. Synchronous like `RemoveDevice`'s sibling
+  `btd_adapter_add_remote_oob_data()` call — it returns once the mgmt command
+  is *queued*, not once mgmt's Command Complete comes back. Matches the
+  existing (BR/EDR) function's behavior exactly; a stricter version that waits
+  for Command Complete and maps `MGMT_STATUS_INVALID_PARAMS` etc. to distinct
+  D-Bus errors is possible (`mgmt_send()` takes a callback) but is more code
+  than the existing sibling function bothers with, so left as a follow-up if
+  upstream review asks for it.
 
 Rationale for a plain adapter method rather than an `org.bluez.Agent1`
 extension: the caller (`mkbd-provision`) already has the TK in hand from the
@@ -148,19 +191,24 @@ ask an agent for, and an adapter method needs no agent-capability negotiation.
 An `Agent1.RequestLegacyOOBKey(object device) -> array{byte}` pull model is the
 nicer long-term UX and can be added later without changing the kernel ABI.
 
-### 2.5 polkit / access control
+### 2.5 Access control
 
-The TK is a pairing secret; anything that can call `AddRemoteLegacyOOB` can
-authenticate a device as the user. Gate it at least as tightly as
-`Adapter1.SetDiscoveryFilter`/`Pair`:
-
-- Add an action `org.bluez.adapter.add-remote-legacy-oob` to
-  `src/bluetooth.conf` / the shipped polkit policy, `auth_admin_keep` for
-  non-root, `yes` for `root` and for the `lp`/`bluetooth` system group that
-  already owns the provisioning helper.
-- If the deployment does not use polkit, fall back to the existing
-  `bluez.conf` D-Bus `<policy user="root">` send_destination rule and document
-  that `mkbd-provision` must run as root.
+**Correction to the original draft, which assumed polkit:** BlueZ does not use
+polkit for D-Bus method authorization. Checked directly —
+`src/bluetooth.conf` is a plain D-Bus system-bus policy file, and its
+`context="default"` block already reads `<allow
+send_destination="org.bluez"/>` with no per-method restriction. That means
+**every** `Adapter1` method — `Pair()`, `RemoveDevice()`, and now
+`AddRemoteLegacyOOB()` — is callable by any local process today; there is no
+polkit action, no `auth_admin_keep`, nothing to add one to. `bluez/0001-*.patch`
+therefore adds no access-control changes, because there is no existing
+precedent on this D-Bus API to extend and inventing one (a bespoke polkit
+integration BlueZ has never had) is a separate, much larger design than this
+patch series. `AddRemoteLegacyOOB` carries exactly the same trust assumption
+`Pair()` already does today: whatever can reach the `org.bluez` system-bus
+name can authenticate a device as the user. Restricting *that*, if wanted, is
+a BlueZ-wide D-Bus policy hardening question, not something specific to this
+feature.
 
 ### 2.6 `src/device.c`
 
@@ -173,10 +221,14 @@ Also confirm the resulting bond is written with `Authenticated=1` — it will be
 because the kernel raises `pending_sec_level` to `BT_SECURITY_HIGH` and reports
 key type 1 (authenticated legacy).
 
-### 2.7 `doc/adapter-api.txt`
+### 2.7 `doc/org.bluez.Adapter.rst`
 
-Document `AddRemoteLegacyOOB`, the byte order, the single-use lifetime, and that
-the key must be re-added before a second successful pairing with the same peer.
+Done in `bluez/0002-*.patch` (the doc lives here, not `doc/adapter-api.txt` —
+bluez-5.87 documents each D-Bus interface as `doc/org.bluez.<Interface>.rst`,
+rendered to the `org.bluez.Adapter(5)` man page). Documents `AddRemoteLegacyOOB`,
+the byte order, the single-use-on-success/kept-on-failure lifetime, and that
+the key must be supplied again before a second successful pairing with the
+same peer.
 
 ---
 

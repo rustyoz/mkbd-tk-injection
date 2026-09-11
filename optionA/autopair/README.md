@@ -43,13 +43,13 @@ USB plug-in
 
 - **Multi-user / multi-seat**: picks the first non-root `loginctl` session.
   Fine for a single-user desktop; not seat-aware.
-- **No BlueZ patch**: pairing goes straight to the kernel `mgmt` control
-  socket, bypassing `bluetoothd` for the duration of the pair (same as
-  `test/optionA-pair.py` / `test/tk-pair.py`), because there is no BlueZ
-  source tree in this repo to patch (`../BLUEZ-NOTES.md` is the spec for that
-  work). Once BlueZ grows an `Adapter1.AddRemoteLegacyOOB()` method, this
-  orchestrator's step 3 becomes a D-Bus call and bluetoothd never needs
-  masking.
+- **BlueZ patches exist (`../bluez/`) but aren't wired in here yet**: pairing
+  still goes straight to the kernel `mgmt` control socket, bypassing
+  `bluetoothd` for the duration of the pair (same as `test/optionA-pair.py` /
+  `test/tk-pair.py`), because the patched `bluetoothd` (`../bluez/README.md`)
+  hasn't been installed on this machine. Once it is, this orchestrator's step
+  3 can call `Adapter1.AddRemoteLegacyOOB()` over D-Bus instead and
+  `bluetoothd` never needs masking — that swap is not done here.
 - **Not yet run against real hardware.** The kernel module and this script are
   both new; see `../BUILD.md` "Status" for exactly what has and hasn't been
   exercised on the physical keyboard.

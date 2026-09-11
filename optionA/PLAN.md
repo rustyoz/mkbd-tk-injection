@@ -17,8 +17,10 @@
 >
 > The signature change is `hci_add_remote_oob_data(..., u8 *le_legacy_tk)`
 > (NULL = none) rather than a flags argument. BlueZ work is specified in
-> `BLUEZ-NOTES.md`; no BlueZ patches were written because there is no BlueZ
-> source tree in this repo.
+> `BLUEZ-NOTES.md`, and as of 2026-09-11 actually patched: `bluez/0001-*.patch`
+> + `0002-*.patch` against upstream bluez-5.87, verified with `git am` and a
+> clean `bluetoothd` build (see `bluez/README.md`) — not yet installed/tested
+> live.
 >
 > **Userspace, for hardware end-to-end testing (2026-09-11).** Patches 1-4
 > also build clean against the *running* kernel (7.1.9-arch1-2, not just the
