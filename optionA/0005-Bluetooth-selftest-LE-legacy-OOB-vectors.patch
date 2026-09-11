@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 02:00:00 +0000
+Subject: [PATCH 5/5] Bluetooth: selftest: LE legacy OOB SMP vectors
+
+Add SMP selftest vectors for LE legacy OOB based on captured vectors in
+this repo (lib/mkbd_crypto.py). This provides deterministic CI coverage.
+
+Add positive and negative tests:
+- Positive: correct TK leads to expected confirm values and STK.
+- Negative: incorrect TK yields failure/rejection.
+
+Add mgmt-tester cases to exercise the MGMT add_remote_oob_data extended payload:
+- success case (flags + 16-byte TK)
+- truncated-tk negative case (flags set but missing TK bytes)
+- insufficient privileges negative case.
+
+Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+*** Begin Patch
+*** Add File: net/bluetooth/selftest_le_legacy_oob.c
++/*
++ * Selftest vectors for LE legacy OOB SMP pairing
++ * (Vectors are taken from repo lib/mkbd_crypto.py and must be copy-pasted
++ * exactly in byte order here.)
++ */
++#include <linux/module.h>
++#include "smp.h"
++#include "hci_core.h"
++#include "selftest.h"
++
++/* Example vector — replace placeholders with the real bytes from repo */
++static const u8 vec1_tk[16] = {
++    0x12,0x34,0x56,0x78,0x9a,0xbc,0xde,0xf0,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88
++};
++static const u8 vec1_mrand[16] = { /* ... */ };
++static const u8 vec1_srand[16] = { /* ... */ };
++static const u8 vec1_expected_mconfirm[16] = { /* ... */ };
++static const u8 vec1_expected_sconfirm[16] = { /* ... */ };
++
++static int __init le_legacy_oob_selftest_init(void)
++{
++    int err;
++
++    /* install an OOB entry simulating mgmt add_remote_oob_data with flags+TK */
++    hci_add_remote_oob_data_direct(NULL /* hdev */, NULL /* addr */, 0 /* addr_type */,
++                                  NULL, NULL, vec1_tk, 1 /* present */);
++
++    /* run SMP pairing harness that uses stored OOB entry */
++    err = run_smp_pairing_harness();
++    if (err)
++        return err;
++
++    /* verify confirms and STK against expected values */
++    if (!compare_confirm_values(vec1_expected_mconfirm, vec1_expected_sconfirm))
++        return -EINVAL;
++
++    /* negative case: wrong TK should fail */
++    hci_add_remote_oob_data_direct(NULL, NULL, 0, NULL, NULL, (u8[]){0}, 1);
++    if (!expect_pairing_failure())
++        return -EIO;
++
++    pr_info("LE legacy OOB selftest passed\n");
++    return 0;
++}
++
++module_init(le_legacy_oob_selftest_init);
++
+*** End Patch

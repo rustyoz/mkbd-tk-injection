@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 02:00:00 +0000
+Subject: [PATCH 4/5] Bluetooth: SMP: distribute local identity for LE legacy OOB bonds
+
+For devices observed in the wild (e.g., Microsoft Modern Keyboard), the device
+will only persist the bond after the initiator distributes identity
+information. Make the kernel include ID key distribution for pairings that use a
+LE legacy OOB TK so these devices can persist bonds without manual workarounds.
+
+This change is limited to the OOB-legacy path (le_legacy_tk_present) and
+can be disabled later or gated behind a quirk.
+
+Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+*** Begin Patch
+*** Update File: net/bluetooth/smp.c
+@@
+ void build_pairing_cmd(struct smp *smp, u8 *cmd)
+ {
+     struct hci_conn *hcon = smp->hcon;
+     u8 authreq = smp->authreq;
+     u8 local_dist = smp->local_dist;
++    struct oob_data *oob = NULL;
+ 
++    /* If a legacy TK is present, include local Identity distribution so the
++     * peer receives our Identity Information & Identity Address. This helps
++     * devices that only persist a bond after the initiator sends identity. */
++    if (hcon && hcon->type == LE_LINK) {
++        oob = hci_remote_oob_data_lookup(hcon->hdev, &hcon->dst);
++        if (oob && oob->le_legacy_tk_present)
++            local_dist |= SMP_DIST_ID_KEY;
++    }
++
+     if (smp->oob_present)
+         authreq |= SMP_OOB_PRESENT;
+*** End Patch
