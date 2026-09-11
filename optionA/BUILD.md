@@ -106,3 +106,46 @@ path over the air, not the boot-time selftest); fix it before submitting patch
       `bluetoothd` stopped for the duration, same as Phase 0. BlueZ now owns
       the reconnect (it's a normal Trusted bond), but `Adapter1.AddRemoteLegacyOOB()`
       itself has not been exercised live.
+- [x] **Reconfirmed after a clean reboot (2026-09-11, later same evening),
+      via `autopair/` + a manual "Connect" click in the GUI + a keyboard
+      power-cycle**: `C9:6C:7E:F7:6C:7E` shows `Paired`/`Bonded`/`Trusted`/
+      `Connected` all `yes`. Auto-reconnect via `Trusted` alone was not quite
+      enough this time — a manual connect kick plus power-cycling the
+      keyboard was needed on top of the autopair-driven pair. Worth keeping
+      in mind for the UX: "unplug and it just reconnects" is not fully
+      reliable yet.
+
+### Known issue: repeated same-boot attempts degrade and can misfire
+
+Across ~8-10 pairing attempts in one evening (both the D-Bus experiment and
+the raw-mgmt path, mostly against the same peer identity), behavior drifted
+from a clean full SMP exchange + `Encryption Change: Success`, to the
+identical code sending only one `Pairing Random` before the **host** issued
+an `HCI Disconnect` (reason `0x15`, before any SMP failure PDU) with no code
+changes in between. `dmesg` showed the tell: `ACL packet for unknown
+connection handle 3585/3586` recurring across nearly an hour of uptime —
+i.e. a leaked/uncleaned connection or SMP state object, most likely from
+patch 2 or 3 not tearing down cleanly on an aborted OOB-legacy pairing.
+
+**Workaround that reliably resolves it: reboot.** A clean boot cleared
+whatever state had accumulated, and the very next attempt paired correctly.
+**Not yet root-caused or fixed in the kernel patches** — if this recurs,
+suspect the same mechanism before assuming a new bug, and don't burn many
+retries against the same peer address in one boot while investigating (each
+attempt also risks the keyboard's own bond state — see
+`autopair/README.md` "The D-Bus pairing experiment").
+
+### Userspace bug found and fixed (not in this repo)
+
+`mkbd_common.mgmt_pair_device()` (sibling `modernkeyboard` repo,
+`lib/mkbd_common.py`) had a race: it treated `MGMT_OP_PAIR_DEVICE`'s Command
+Complete as terminal the instant it arrived, but on this kernel it can arrive
+*before* `MGMT_EV_NEW_LTK` — so a pairing that was actually completing
+correctly (full SMP exchange, real `Encryption Change: Success` in a `btmon`
+capture) got reported as `FAIL: no LTK distributed`. Fixed 2026-09-11 to keep
+listening for the LTK (with a short grace period for a following IRK)
+instead of trusting the premature success. This was likely responsible for
+at least one of the "failed" attempts in the same-boot-degradation story
+above actually having been a real pairing, misreported and then retried
+unnecessarily. Uncommitted in that repo as of this writing — a separate git
+history from this one.

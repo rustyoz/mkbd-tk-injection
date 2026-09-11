@@ -40,6 +40,17 @@
 > BlueZ patch is still not installed, so this went through the raw `mgmt`
 > path with `bluetoothd` stopped for the pair, same as Phase 0 — BlueZ owns
 > the reconnect afterward since it's a normal Trusted bond.
+>
+> **Known issue (2026-09-11): repeated same-boot pairing attempts against the
+> same peer can degrade and misfire** (a real SMP exchange one run, a
+> host-initiated disconnect mid-SMP the next, no code changes in between) —
+> `dmesg` showed leaked/stale connection state (`ACL packet for unknown
+> connection handle`) consistent with patch 2 or 3 not cleaning up fully on
+> an aborted pairing. **Reboot reliably clears it**; not yet root-caused in
+> the patches themselves. Full details in `BUILD.md`. A related false-failure
+> bug in the shared `mgmt_pair_device()` helper (sibling `modernkeyboard`
+> repo) was found and fixed the same evening — it could report a genuinely
+> successful pairing as failed.
 
 This folder documents the plan to implement "Option A": extend the existing
 MGMT_OP_ADD_REMOTE_OOB_DATA command so that a third accepted payload length
