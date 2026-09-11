@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 01:40:00 +0000
+Subject: [PATCH 1/5] Bluetooth: mgmt: accept an LE legacy OOB Temporary Key
+
+Add support to MGMT_OP_ADD_REMOTE_OOB_DATA for a third accepted payload
+length carrying an explicit flags byte and a 16-byte LE legacy Temporary
+Key (TK). This is additive and backward-compatible: callers that send the
+old payload sizes are unchanged.
+
+The new uapi constant is MGMT_ADD_REMOTE_OOB_DATA_SIZE_LE_LEGACY and
+MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT marks that the TK bytes follow the
+flags byte.
+
+Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+ optionA/0001-Bluetooth-mgmt-accept-LE-legacy-OOB-TK.patch | 95 ++++++++++++++
+ 1 file changed, 95 insertions(+)
+ create mode 100644 optionA/0001-Bluetooth-mgmt-accept-LE-legacy-OOB-TK.patch
+
+*** Begin Patch
+*** Add File: optionA/0001-Bluetooth-mgmt-accept-LE-legacy-OOB-TK.patch
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: Russell Oliver <roliver8143@gmail.com>
++Date: Fri, 11 Sep 2026 01:40:00 +0000
++Subject: [PATCH 1/5] Bluetooth: mgmt: accept an LE legacy OOB Temporary Key
++
++Add support to MGMT_OP_ADD_REMOTE_OOB_DATA for a third accepted payload
++length carrying an explicit flags byte and a 16-byte LE legacy Temporary
++Key (TK). This is additive and backward-compatible: callers that send the
++old payload sizes are unchanged.
++
++The new uapi constant is MGMT_ADD_REMOTE_OOB_DATA_SIZE_LE_LEGACY and
++MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT marks that the TK bytes follow the
++flags byte.
++
++Signed-off-by: Russell Oliver <roliver8143@gmail.com>
++---
++[.../uapi and kernel header diffs elided in patch body for brevity ...]
++
++diff --git a/include/uapi/linux/mgmt.h b/include/uapi/linux/mgmt.h
++index 0000000..1111111 100644
++--- a/include/uapi/linux/mgmt.h
+++++ b/include/uapi/linux/mgmt.h
++@@
++ /* Existing base size for BR/EDR legacy OOB (addr + hash192 + rand192) */
++ #define MGMT_ADD_REMOTE_OOB_DATA_SIZE           41 /* existing value */
++
++ /* Extended payload: base + flags (u8) + 16-byte LE legacy TK */
+++#define MGMT_ADD_REMOTE_OOB_DATA_SIZE_LE_LEGACY \
+++    (MGMT_ADD_REMOTE_OOB_DATA_SIZE + 1 + 16)
++
++ /* flags for the extended payload */
++ #define MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT     0x01
++
++ /* If payload length == MGMT_ADD_REMOTE_OOB_DATA_SIZE_LE_LEGACY, the parser
++  * must consume a u8 flags byte; if MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT is
++  * set the following 16 bytes are the LE legacy TK.
++  */
++
++diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
++index 2222222..3333333 100644
++--- a/include/net/bluetooth/hci_core.h
+++++ b/include/net/bluetooth/hci_core.h
++@@
++ struct oob_data {
++     bdaddr_t addr;
++     u8 addr_type;
++     u8 hash192[24];
++     u8 rand192[16];
++     u8 *hash256;
++     u8 *rand256;
++
+++    /* LE legacy Temporary Key (128 bit) — only valid when present flag set */
+++    u8 le_legacy_tk[16];
+++    u8 le_legacy_tk_present; /* MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT */
++
++     /* ... other fields ... */
++ };
++
++diff --git a/net/bluetooth/mgmt.c b/net/bluetooth/mgmt.c
++index 4444444..5555555 100644
++--- a/net/bluetooth/mgmt.c
+++++ b/net/bluetooth/mgmt.c
++@@
++ static void add_remote_oob_data(struct mgmt_conn *conn, const void *data,
++                                 size_t len)
++ {
++     const u8 *p = data;
++     struct oob_data oob = { 0 };
++
++     if (len == MGMT_ADD_REMOTE_OOB_DATA_SIZE) {
++         /* existing parse path for hash192/rand192 */
++         memcpy(&oob.addr, p, sizeof(oob.addr));
++         /* parse existing fields ... */
++     } else if (len == MGMT_ADD_REMOTE_OOB_DATA_SIZE_LE_LEGACY) {
++         size_t base = MGMT_ADD_REMOTE_OOB_DATA_SIZE;
++         u8 flags = p[base];
++         const u8 *tk = &p[base + 1];
++
++         /* parse base fields as existing implementation expects */
++         memcpy(&oob.addr, p, sizeof(oob.addr));
++         /* parse hash192/rand192 ... */
++
++         if (flags & MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT) {
++             memcpy(oob.le_legacy_tk, tk, 16);
++             oob.le_legacy_tk_present = 1;
++         } else {
++             oob.le_legacy_tk_present = 0;
++         }
++     } else {
++         mgmt_cmd_complete(conn, MGMT_OP_ADD_REMOTE_OOB_DATA,
++                           MGMT_STATUS_INVALID_PARAMS);
++         return;
++     }
++
++     /* permission check: CAP_NET_ADMIN or mgmt ACL */
++     if (!mgmt_has_priv(conn)) {
++         mgmt_cmd_complete(conn, MGMT_OP_ADD_REMOTE_OOB_DATA,
++                           MGMT_STATUS_NOT_ALLOWED);
++         return;
++     }
++
++     /* store the data (hci_add_remote_oob_data will apply per-controller semantics) */
++     hci_add_remote_oob_data(&oob);
++
++     mgmt_cmd_complete(conn, MGMT_OP_ADD_REMOTE_OOB_DATA, MGMT_STATUS_SUCCESS);
++ }
++
+*** End Patch
+*** End Add File
