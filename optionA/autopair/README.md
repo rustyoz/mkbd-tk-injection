@@ -50,6 +50,12 @@ USB plug-in
   hasn't been installed on this machine. Once it is, this orchestrator's step
   3 can call `Adapter1.AddRemoteLegacyOOB()` over D-Bus instead and
   `bluetoothd` never needs masking — that swap is not done here.
-- **Not yet run against real hardware.** The kernel module and this script are
-  both new; see `../BUILD.md` "Status" for exactly what has and hasn't been
-  exercised on the physical keyboard.
+- **The underlying pairing engine is hardware-verified (2026-09-11)** — see
+  `../BUILD.md` "Status": `pairmodernkeyboard.sh --option-a` (run by hand, not
+  through this `autopair/` wrapper) produced a real bonded, connected,
+  GATT-resolved keyboard with working `uhid` input devices.
+- **This `autopair/` orchestrator itself — the udev rule, the service, the
+  zenity prompt flow — has not been installed or triggered yet.** Only the
+  pairing engine it wraps (step 3) has hardware evidence behind it; steps 1-2
+  and 4-6 (detect, prompt, disconnect-watch, reconnect-confirm) are still
+  untested. `install.sh` has not been run on this machine.

@@ -88,11 +88,21 @@ path over the air, not the boot-time selftest); fix it before submitting patch
       (running kernel).
 - [x] `net/bluetooth/bluetooth.ko` links with the correct vermagic for
       `7.1.9-arch1-2`, staged at `../artifacts/bluetooth-7.1.9-arch1-2-optionA.ko`.
-- [ ] **Not yet installed or booted.** `test/install-optionA-module.sh` stages
-      it to `/lib/modules/.../bluetooth.ko*` (with a backup) but needs a manual
-      reboot — not done from here.
-- [ ] **Not yet tested on real hardware.** `test/optionA-pair.py` (via
-      `pairmodernkeyboard.sh --option-a`) and the `autopair/` automation are
-      written and gated correctly (they fail closed with a clear message if
-      the running kernel doesn't accept the MGMT payload), but have not run
-      against the booted patched kernel + physical keyboard.
+- [x] Installed and booted: `/sys/module/bluetooth/srcversion` on the running
+      system reads `25B2F2F6E13453DFB2E7358`, matching this build exactly.
+- [x] **Hardware-verified end to end (2026-09-11).** `pairmodernkeyboard.sh
+      --option-a` completed a real pairing: `bluetoothctl info` on the
+      keyboard (`C9:6C:7E:F4:6C:7E`) shows `Paired: yes`, `Bonded: yes`,
+      `Trusted: yes`, `Connected: yes`, full GATT service resolution (HID,
+      Battery at 86%, the vendor service), and the kernel created live `uhid`
+      input devices (`/proc/bus/input/devices` — `BTLE Keyboard Fingerprint ID`,
+      full keymap) that a normal LE HID-over-GATT bond produces. This is the
+      MGMT_OP_ADD_REMOTE_OOB_DATA (len-88) path in patches 1-4 actually
+      authenticating and completing SMP against the real keyboard, not just
+      compiling.
+- [ ] The patched BlueZ (`../bluez/`) is still not installed — this pairing
+      went through the raw `mgmt` socket path
+      (`test/optionA-pair.py`/`pairmodernkeyboard.sh --option-a`), with
+      `bluetoothd` stopped for the duration, same as Phase 0. BlueZ now owns
+      the reconnect (it's a normal Trusted bond), but `Adapter1.AddRemoteLegacyOOB()`
+      itself has not been exercised live.

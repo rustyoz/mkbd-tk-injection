@@ -31,8 +31,15 @@
 > 0's `test/tk-pair.py`); run it via `./pairmodernkeyboard.sh --option-a`.
 > `autopair/` wraps that into the full detect → prompt → pair → confirm →
 > prompt-disconnect → confirm-reconnect flow via a udev rule + systemd
-> service — see `autopair/README.md`. None of this has run against the
-> physical keyboard yet (module not installed/booted).
+> service — see `autopair/README.md`.
+>
+> **Hardware-verified (2026-09-11).** `pairmodernkeyboard.sh --option-a`
+> paired the real keyboard: `Paired`/`Bonded`/`Trusted`/`Connected` all
+> `yes`, full GATT resolution (HID, Battery 86%), live `uhid` input devices
+> with a working keymap. Details and evidence in `BUILD.md` "Status". The
+> BlueZ patch is still not installed, so this went through the raw `mgmt`
+> path with `bluetoothd` stopped for the pair, same as Phase 0 — BlueZ owns
+> the reconnect afterward since it's a normal Trusted bond.
 
 This folder documents the plan to implement "Option A": extend the existing
 MGMT_OP_ADD_REMOTE_OOB_DATA command so that a third accepted payload length
