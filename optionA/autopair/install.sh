@@ -33,8 +33,7 @@ echo
 echo "Prereqs before this does anything useful:"
 echo "  1. sudo test/install-optionA-module.sh   (from the repo root)"
 echo "  2. reboot"
-echo "  3. sudo test/install-optionA-bluetoothd.sh   (patched bluetoothd, no reboot needed)"
-echo "  4. zenity + notify-send/libnotify installed and a notification agent running"
+echo "  3. zenity + notify-send/libnotify installed and a notification agent running"
 echo "     in the target graphical session"
 echo
 echo "Test without physically unplugging/replugging:"

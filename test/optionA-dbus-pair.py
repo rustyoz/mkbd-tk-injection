@@ -4,12 +4,19 @@ test/optionA-pair.py, but through bluetoothd's own Adapter1.AddRemoteLegacyOOB()
 D-Bus method with bluetoothd left running throughout, instead of the raw mgmt
 socket with bluetoothd stopped.
 
-What this answers: docs/PROTOCOL.md (sibling modernkeyboard repo) flags that
-BlueZ's normal Device1.Pair() is *unproven* to catch the keyboard's short
-directed LE advertising window — that's why every other script here
-(tk-pair.py, optionA-pair.py) uses MGMT_OP_PAIR_DEVICE directly instead. This
-script is the actual experiment: does StartDiscovery() + waiting for the
-Device1 object to appear + Pair() work, or does the advertisement get missed?
+RESULT (2026-09-11, real hardware): failed 5/5. BlueZ's StartDiscovery()
+never saw the keyboard's directed advertisement within 20s, any number of
+retries. This confirms docs/PROTOCOL.md's (sibling modernkeyboard repo)
+original caution that BlueZ's normal Device1.Pair() cannot catch this
+keyboard's short directed LE advertising window — that's why every other
+script here (tk-pair.py, optionA-pair.py) uses MGMT_OP_PAIR_DEVICE directly
+instead, and optionA/autopair/mkbd-optionA-autopair was reverted back to that
+after trying this. Do not wire this back into the auto-pair flow without
+first fixing the discovery miss (e.g. an HCI-level directed-connect instead
+of generic discovery) — repeated failed attempts here also cost the
+keyboard's previously-working bond (see optionA/autopair/README.md "The
+D-Bus pairing experiment"). Kept as a runnable record of the experiment, not
+as a recommended path.
 
 Needs test/install-optionA-bluetoothd.sh already run (AddRemoteLegacyOOB has
 to exist on the live bus) and root (hidraw + system D-Bus).

@@ -1,5 +1,5 @@
 [Unit]
-Description=Auto-detect and offer to pair the Modern Keyboard (Option A, D-Bus AddRemoteLegacyOOB)
+Description=Auto-detect and offer to pair the Modern Keyboard (Option A, mgmt LE legacy OOB TK)
 After=bluetooth.service
 Wants=bluetooth.service
 # udev fires this per hidraw "add"; a bare (non-templated) oneshot means a
