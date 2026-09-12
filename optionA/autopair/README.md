@@ -48,50 +48,69 @@ USB plug-in
 (The patched `bluetoothd` from `../bluez/` is *not* a prerequisite for this
 flow — see below.)
 
-## The D-Bus pairing experiment (tried, failed, reverted)
+## The D-Bus pairing path (bluetoothd never stops)
 
-Step 3 briefly called `Adapter1.AddRemoteLegacyOOB()` over D-Bus +
-`StartDiscovery()`/`Device1.Pair()` instead (`../../test/optionA-dbus-pair.py`),
-so `bluetoothd` would never need stopping. **Tested on real hardware
-2026-09-11: failed 5/5.** BlueZ discovery never saw the keyboard's directed
-advertisement within 20s, any number of retries — confirming
-`docs/PROTOCOL.md`'s (sibling repo) original caution that BlueZ's normal
-discovery/pair path can't catch this keyboard's directed advertising window.
+Step 3 calls `Adapter1.AddRemoteLegacyOOB()` + `Adapter1.ConnectDevice()`
+over D-Bus, then `Device1.Pair()` (`../../test/optionA-dbus-pair.py`), so
+`bluetoothd` never needs stopping.
 
-Worse, the failed attempts had a real cost: **each one re-runs F1/F2/F3, and
-this keyboard appears to abandon its currently active bond as soon as a new
-pairing exchange starts — whether or not that attempt then succeeds.** Five
-failed D-Bus attempts in a row cost the previously-working bond from an
-earlier successful `--option-a` pair, which had to be re-established with
-the raw-mgmt path afterward. `test/optionA-dbus-pair.py` and the patched
-`bluetoothd` (`../bluez/`) are kept as-is for reference, but **don't retry
-this path** without first fixing the discovery-miss, and be aware that
-testing it at all risks the current bond.
+**First attempt (2026-09-11) used `StartDiscovery()`/poll-for-`Device1`
+instead of `ConnectDevice()` and failed 5/5.** BlueZ discovery never saw the
+keyboard's directed advertisement within 20s, any number of retries —
+confirming `docs/PROTOCOL.md`'s (sibling repo) original caution that BlueZ's
+normal discovery/pair path can't catch this keyboard's directed advertising
+window. Worse, the failed attempts had a real cost: **each one re-runs
+F1/F2/F3, and this keyboard appears to abandon its currently active bond as
+soon as a new pairing exchange starts — whether or not that attempt then
+succeeds.** Five failed D-Bus attempts in a row cost the previously-working
+bond from an earlier successful `--option-a` pair, which had to be
+re-established with the raw-mgmt path afterward.
 
-**Discovery-miss fix candidate found, not yet tried (2026-09-12):** the
-script's failure is specifically that `Device1.Pair()` requires a `Device1`
-object, and BlueZ only creates one from a discovery "device found" report —
-which never fires for this keyboard's directed advertisement. That's a
-different mechanism from the actual LE connection attempt (`LE Create
-Connection`, which is what the working raw-mgmt path uses and what
-`Device1.Connect()`/`Pair()` also trigger internally once a device object
-exists) — the raw-mgmt path never depends on discovery at all, it connects
-straight to the known address.
+**Second attempt (2026-09-12) swapped in `Adapter1.ConnectDevice()` — a
+stock, `[experimental]`-flagged BlueZ method whose own doc string is
+literally "Connects to device without need of performing General Discovery"
+(`man 5 org.bluez.Adapter`) — and it worked, first try, on real hardware:**
 
-BlueZ (confirmed on this exact box: bluez 5.87-2, bluetoothd already running
-with `--experimental` via a systemd drop-in, `busctl --system introspect
-org.bluez /org/bluez/hci0` shows it on the live bus) already exposes exactly
-this as `Adapter1.ConnectDevice(dict)` — `man 5 org.bluez.Adapter`: *"Connects
-to device without need of performing General Discovery... similar to Connect
-method on Device1... returns object path to created device object."* This is
-a stock, already-callable BlueZ method, not something that needs patching in.
-The untried fix: in `test/optionA-dbus-pair.py`, replace the
-`StartDiscovery()` + poll-for-`Device1` block with one call to
-`Adapter1.ConnectDevice({"Address": addr, "AddressType": "random"})`, then
-proceed to `Device1.Pair()` (or check whether the OOB-armed peer completes
-SMP automatically once connected, since the peripheral itself is what
-initiates the security request). Not yet tested on hardware — do that before
-relying on it, same bond-risk caveat as above applies to each attempt.
+```
+:: Adapter1.AddRemoteLegacyOOB(C9:6C:7E:11:6C:7E, random, tk=...) over D-Bus ...
+   stored — kernel now has the TK for this identity
+:: Adapter1.ConnectDevice(C9:6C:7E:11:6C:7E, random), timeout 20s ...
+   connected, Device1 at /org/bluez/hci0/dev_C9_6C_7E_11_6C_7E after 0.1s
+:: Device1.Pair() -> C9:6C:7E:11:6C:7E (timeout 30s) ...
+
+OK  Paired=True Bonded=True Connected=True
+*** D-BUS PAIRING WORKS — bluetoothd handled the whole thing, never stopped ***
+```
+
+Checked separately right after (a different, one-later bond address,
+`C9:6C:7E:12:6C:7E` — see "note" below): `bluetoothctl info` showed
+`Paired`/`Bonded`/`Trusted`/`Connected` all `yes`, full GATT resolution
+(Human Interface Device, Battery Service at 85%, Device Information, the
+vendor service), and `/proc/bus/input/devices` had a live `bluez-hog-device
+Keyboard` uhid input device (`Uniq=c9:6c:7e:12:6c:7e`) with a full keymap —
+i.e. bluetoothd's own HoGP-to-uhid bridge did the same job the raw-mgmt
+path's in-kernel one did, matching `../BUILD.md`'s hardware-verification bar
+for the raw-mgmt path, this time with `bluetoothd` never stopped or masked.
+
+This is one successful run, not a five-run stress test, and the earlier
+"5/5 failed" was specifically a discovery-pipeline problem this bypasses
+entirely rather than evidence the pairing mechanism itself was flaky — so
+treat it as verified-working, not yet stress-tested. The same caveats as
+before still apply to *repeated* attempts: this keyboard abandons its
+currently active bond as soon as a new F1/F2/F3 exchange starts regardless of
+outcome, and same-boot repeated-attempt degradation has separately been
+observed via the raw-mgmt path (`../BUILD.md` "Known issue") — a likely fix
+for that landed in `mgmt_pair_device()`, which this D-Bus script doesn't even
+use, so whether the same degradation can affect this path too is still open.
+
+Note: the live bonded address (`...12...`) was one bond-address-increment
+ahead of the one this test script paired (`...11...`) by the time it was
+checked — most likely the already-installed system-wide autopair
+(`/etc/udev/...`/`/etc/systemd/...`, installed and exercised on 2026-09-11
+per `../BUILD.md`) auto-fired again from the same USB event using whatever
+version of `mkbd-optionA-autopair` was installed at the time, not necessarily
+the one in this checkout. Reinstall via `../autopair/install.sh` to sync it
+if that matters for further testing.
 
 ## What's not handled here
 

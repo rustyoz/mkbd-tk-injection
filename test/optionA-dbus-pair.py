@@ -14,19 +14,29 @@ that. The raw MGMT_OP_PAIR_DEVICE path (test/optionA-pair.py) never depends
 on that report pipeline at all — it issues a direct LE Create Connection to
 the known address — which is why it kept working throughout.
 
-SECOND ATTEMPT (2026-09-12, not yet hardware-tested): swapped StartDiscovery()
-for Adapter1.ConnectDevice(), a stock (if `[experimental]`-flagged) BlueZ
-method whose own doc string is literally "Connects to device without need of
-performing General Discovery" (man 5 org.bluez.Adapter). Confirmed present
-and callable on this box's live D-Bus (bluez 5.87-2, bluetoothd already
-running with --experimental via a systemd drop-in) before writing this.
-ConnectDevice drives a direct connection by address the same way the raw-mgmt
-path does, so it should route around the exact failure mode above without
-needing any further BlueZ patch. This has NOT been run against real hardware
-yet — do that deliberately (not via the udev-triggered autopair flow) before
-trusting it, and remember repeated failed attempts here have previously cost
-the keyboard's *previously-working* bond regardless of why they failed (see
-optionA/autopair/README.md "The D-Bus pairing experiment").
+SECOND ATTEMPT (2026-09-12, real hardware): SUCCESS. Swapped
+StartDiscovery() for Adapter1.ConnectDevice(), a stock (if
+`[experimental]`-flagged) BlueZ method whose own doc string is literally
+"Connects to device without need of performing General Discovery" (man 5
+org.bluez.Adapter). ConnectDevice drives a direct connection by address the
+same way the raw-mgmt path does, and it worked first try: connected in 0.1s,
+Device1.Pair() completed, Paired/Bonded/Connected all true, and — checked
+separately after this script exited — full GATT resolution (HID, Battery at
+85%, Device Information, the vendor service) plus a live `bluez-hog-device`
+uhid keyboard input device, all with bluetoothd never stopped or masked for
+one second of it. This is the first time the whole pairing has gone through
+bluetoothd's own D-Bus surface end to end.
+
+One run is not five, and "5/5 failed" before was specifically a discovery
+problem this bypasses entirely rather than proof the underlying mechanism is
+flaky — but there's no longer a known reason this shouldn't be the normal
+path. Repeated attempts against the same peer within one boot have separately
+been observed to degrade (see optionA/BUILD.md "Known issue"; a likely fix
+for that has been applied to mgmt_pair_device(), which this script doesn't
+even use, so it's an open question whether the same degradation can affect
+this path too) and this keyboard abandons its currently active bond as soon
+as a new F1/F2/F3 exchange starts regardless of outcome — so still don't
+burn retries against the same peer casually.
 
 Needs test/install-optionA-bluetoothd.sh already run (AddRemoteLegacyOOB has
 to exist on the live bus), bluetoothd running with --experimental (needed for

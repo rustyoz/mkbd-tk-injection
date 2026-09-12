@@ -100,12 +100,21 @@ path over the air, not the boot-time selftest); fix it before submitting patch
       MGMT_OP_ADD_REMOTE_OOB_DATA (len-88) path in patches 1-4 actually
       authenticating and completing SMP against the real keyboard, not just
       compiling.
-- [ ] The patched BlueZ (`../bluez/`) is still not installed — this pairing
-      went through the raw `mgmt` socket path
+- [x] **`Adapter1.AddRemoteLegacyOOB()` exercised live over D-Bus with
+      `bluetoothd` never stopped (2026-09-12)**, via `test/optionA-dbus-pair.py`
+      using `Adapter1.ConnectDevice()` (connect-by-address, no discovery
+      needed) instead of the `StartDiscovery()` approach that failed 5/5 on
+      2026-09-11 (see `autopair/README.md` "The D-Bus pairing path"). Result:
+      `Paired=True Bonded=True Connected=True`, and a follow-up check showed
+      full GATT resolution (HID, Battery 85%, Device Information) and a live
+      `bluez-hog-device` uhid keyboard device — bluetoothd handled discovery,
+      connection, pairing, and HID profile setup itself, matching the
+      hardware-verification bar below but without ever stopping bluetoothd.
+      One run, not a stress test yet.
+      Originally this pairing went through the raw `mgmt` socket path
       (`test/optionA-pair.py`/`pairmodernkeyboard.sh --option-a`), with
-      `bluetoothd` stopped for the duration, same as Phase 0. BlueZ now owns
-      the reconnect (it's a normal Trusted bond), but `Adapter1.AddRemoteLegacyOOB()`
-      itself has not been exercised live.
+      `bluetoothd` stopped for the duration, same as Phase 0; that path is
+      kept as the proven fallback (see `autopair/mkbd-optionA-autopair`).
 - [x] **Reconfirmed after a clean reboot (2026-09-11, later same evening),
       via `autopair/` + a manual "Connect" click in the GUI + a keyboard
       power-cycle**: `C9:6C:7E:F7:6C:7E` shows `Paired`/`Bonded`/`Trusted`/

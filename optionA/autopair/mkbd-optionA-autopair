@@ -17,9 +17,11 @@
 # ConnectDevice() and failed 5/5 on real hardware (2026-09-11): BlueZ
 # discovery never saw the keyboard's directed advertisement within 20s.
 # ConnectDevice() (2026-09-12) connects directly by address, the same
-# mechanism the raw-mgmt path already relies on — NOT YET HARDWARE-VERIFIED,
-# see test/optionA-dbus-pair.py's header before trusting this. The fallback
-# to raw-mgmt exists because of what happened last time either way: **this
+# mechanism the raw-mgmt path already relies on — hardware-verified working
+# 2026-09-12 (test/optionA-dbus-pair.py's header has the transcript + GATT/
+# uhid follow-up check), but as one run, not a stress test; the fallback
+# below is kept regardless. The fallback to raw-mgmt exists because of what
+# happened the first time either way: **this
 # keyboard appears to abandon its currently active bond as soon as a new
 # F1/F2/F3 pairing exchange starts, whether or not that attempt then
 # succeeds** — so if the D-Bus attempt fails, the bond is already gone
@@ -107,8 +109,7 @@ fi
 #    back to the raw-mgmt path (Option A: MGMT_OP_ADD_REMOTE_OOB_DATA,
 #    extended payload; bluetoothd stopped for the duration) if it fails. See
 #    the file header for why the fallback exists and test/optionA-dbus-pair.py
-#    for the D-Bus path's own status (not yet hardware-verified as of this
-#    writing).
+#    for the D-Bus path's own status (hardware-verified 2026-09-12, one run).
 # --------------------------------------------------------------------------- #
 notify "Pairing…"
 LOG=$(mktemp /tmp/mkbd-optionA-autopair.XXXXXX.log)
