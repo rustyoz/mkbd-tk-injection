@@ -1,17 +1,25 @@
 //! Auto-detect -> prompt -> pair -> confirm -> prompt-disconnect ->
 //! confirm-reconnect, end to end, for the Microsoft Modern Keyboard over the
-//! Option A kernel path. Port of
-//! optionA/autopair/mkbd-optionA-autopair (bash + udev + zenity/notify-send),
-//! folded into this binary as `mkbd-pair auto` instead of shelling out to
-//! pairmodernkeyboard.sh — the pairing engine now runs in-process, so the
-//! result is read directly off the `PairOutcome` instead of grepping a log
-//! file for the wrapper script's summary lines.
+//! Option A D-Bus path. Port of optionA/autopair/mkbd-optionA-autopair
+//! (bash + udev + zenity/notify-send), folded into this binary as
+//! `mkbd-pair auto` instead of shelling out to pairmodernkeyboard.sh — the
+//! pairing engine now runs in-process, so the result is read directly off
+//! the `DbusPairOutcome` instead of grepping a log file for the wrapper
+//! script's summary lines.
 //!
-//! Needs: root (mgmt socket + hidraw), the Option A patched bluetooth.ko
-//! booted, zenity + notify-send in the logged-in graphical session.
+//! Earlier versions of this file tried the D-Bus path first and fell back to
+//! a raw-mgmt Option A path (bluetoothd stopped/masked for the duration) on
+//! failure, mirroring the bash original. That raw-mgmt engine was removed
+//! from this crate after a masked-but-not-restored bluetooth.service from an
+//! earlier test run broke Bluetooth entirely — see main.rs's module doc.
+//! There is now nothing to fall back to; a failed D-Bus attempt is just a
+//! failure.
+//!
+//! Needs: root (hidraw + system D-Bus), bluetoothd running with
+//! `--experimental` and the AddRemoteLegacyOOB patch, zenity + notify-send
+//! in the logged-in graphical session.
 
 use crate::dbus_pair;
-use crate::pair::{self, Engine, PairOpts};
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
 use std::process::{Command, Stdio};
@@ -181,16 +189,6 @@ pub fn run_auto(opts: &AutoOpts) -> Result<(), String> {
 
     session.notify("Pairing…", None);
 
-    // Try the D-Bus path first (bluetoothd stays up throughout); fall back to
-    // the proven raw-mgmt Option A path (bluetoothd stopped for the duration)
-    // if it fails — mirroring optionA/autopair/mkbd-optionA-autopair on
-    // worktree-kernel-leak-fix (commit af3523e). The fallback exists because
-    // of what happens either way on failure: this keyboard abandons its
-    // currently active bond as soon as a new F1/F2/F3 exchange starts,
-    // whether or not that attempt then succeeds — so if the D-Bus attempt
-    // fails, the bond is already gone regardless, and falling straight back
-    // to the path known to work re-establishes it in the same run instead of
-    // leaving the user stranded.
     let dbus_opts = dbus_pair::DbusPairOpts {
         hci: opts.hci.clone(),
         ..Default::default()
@@ -201,28 +199,9 @@ pub fn run_auto(opts: &AutoOpts) -> Result<(), String> {
             o.addr
         }
         Err(e) => {
-            log(format!(
-                "D-Bus pairing path failed ({e}), falling back to raw-mgmt \
-                 (bluetoothd will be stopped for the duration)"
-            ));
-            let pair_opts = PairOpts {
-                engine: Engine::OptionA,
-                hci: opts.hci.clone(),
-                ..Default::default()
-            };
-            match pair::run_pair(&pair_opts) {
-                Ok(o) => {
-                    log(format!("paired via raw-mgmt fallback: {}", o.addr));
-                    o.addr
-                }
-                Err(e2) => {
-                    log("both pairing paths failed");
-                    session.error_box(&format!(
-                        "Pairing failed (D-Bus and raw-mgmt both).\n\nD-Bus:\n{e}\n\nraw-mgmt:\n{e2}"
-                    ));
-                    return Err(format!("D-Bus: {e}; raw-mgmt: {e2}"));
-                }
-            }
+            log(format!("pairing failed: {e}"));
+            session.error_box(&format!("Pairing failed.\n\n{e}"));
+            return Err(e);
         }
     };
 

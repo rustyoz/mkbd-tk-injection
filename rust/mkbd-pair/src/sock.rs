@@ -1,11 +1,12 @@
-//! Raw AF_BLUETOOTH socket plumbing: the HCI MGMT control channel
-//! (lib/mkbd_common.py's `_mgmt_cmd` / `mgmt_pair_device`) and the L2CAP ATT
-//! fixed channel (test/phase4.py's `connect_att`). Linux only.
+//! Raw AF_BLUETOOTH socket plumbing for the L2CAP ATT fixed channel
+//! (test/phase4.py's `connect_att`). Linux only.
 //!
 //! Rust's std::net has no AF_BLUETOOTH support, so this goes through raw
-//! libc socket()/bind()/connect()/setsockopt() calls with hand-written
-//! sockaddr structs matching <bluetooth/bluetooth.h>, <bluetooth/hci.h> and
-//! <bluetooth/l2cap.h>.
+//! libc socket()/bind()/connect()/setsockopt() calls with a hand-written
+//! sockaddr struct matching <bluetooth/bluetooth.h> and <bluetooth/l2cap.h>.
+//! (This module used to also carry the HCI MGMT control-channel socket for
+//! the raw-mgmt pairing engine; that engine was removed — see main.rs's
+//! module doc — along with the now-unused HCI/MGMT bits here.)
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -13,26 +14,14 @@ use std::time::Duration;
 
 pub const AF_BLUETOOTH: i32 = 31;
 pub const BTPROTO_L2CAP: i32 = 0;
-pub const BTPROTO_HCI: i32 = 1;
 pub const SOL_BLUETOOTH: i32 = 274;
 pub const BT_SECURITY: i32 = 4;
 pub const BT_SECURITY_HIGH: u8 = 3;
 
-pub const HCI_CHANNEL_CONTROL: u16 = 3;
-pub const HCI_DEV_NONE: u16 = 0xFFFF;
-
-/// bdaddr_type values used by the kernel's L2CAP socket address (distinct
-/// from the MGMT address-type constants in mgmt.rs).
+/// bdaddr_type values used by the kernel's L2CAP socket address.
 pub const BDADDR_BREDR: u8 = 0;
 pub const BDADDR_LE_PUBLIC: u8 = 1;
 pub const BDADDR_LE_RANDOM: u8 = 2;
-
-#[repr(C)]
-struct SockaddrHci {
-    hci_family: libc::sa_family_t,
-    hci_dev: u16,
-    hci_channel: u16,
-}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -61,30 +50,6 @@ impl RawSock {
         Ok(Self {
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
         })
-    }
-
-    /// AF_BLUETOOTH / BTPROTO_HCI raw socket, bound to the MGMT control
-    /// channel (index HCI_DEV_NONE) — the "mgmt socket" throughout mkbd_common.py.
-    pub fn mgmt_control() -> io::Result<Self> {
-        let s = Self::from_raw_checked(unsafe {
-            libc::socket(AF_BLUETOOTH, libc::SOCK_RAW, BTPROTO_HCI)
-        })?;
-        let addr = SockaddrHci {
-            hci_family: AF_BLUETOOTH as libc::sa_family_t,
-            hci_dev: HCI_DEV_NONE,
-            hci_channel: HCI_CHANNEL_CONTROL,
-        };
-        let rc = unsafe {
-            libc::bind(
-                s.fd.as_raw_fd(),
-                &addr as *const SockaddrHci as *const libc::sockaddr,
-                std::mem::size_of::<SockaddrHci>() as u32,
-            )
-        };
-        if rc != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(s)
     }
 
     /// AF_BLUETOOTH / BTPROTO_L2CAP SEQPACKET socket for the fixed ATT

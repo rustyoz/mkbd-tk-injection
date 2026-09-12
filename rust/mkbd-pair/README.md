@@ -5,192 +5,173 @@ ID, model 1780) pairing tools, built for eventual release packaging (see
 `../../PLUGIN-PLAN.md` section 2, "Userspace → `mkbd-pair`"). One static
 binary instead of a Python engine + a vendored library + two bash wrappers.
 
-**Status: `dbus-pair` is hardware-verified (2026-09-12); everything else is
-still unverified, and none of it is wired in.** `../../pairmodernkeyboard.sh`
-and `../../optionA/autopair/mkbd-optionA-autopair` are untouched and remain
-the tools actually wired to udev/systemd. Do not point those at this binary,
-and do not delete the Python tools, until each path below has been exercised
-on real hardware.
+**Status: `dbus-pair` and `auto`'s pairing step are hardware-verified
+(2026-09-12); the reconnect-after-unplug leg of `auto` is not, and `adopt`
+hasn't been exercised standalone. None of it is wired in** —
+`../../pairmodernkeyboard.sh` and `../../optionA/autopair/mkbd-optionA-autopair`
+are untouched and remain the tools actually wired to udev/systemd. Do not
+point those at this binary, and do not delete the Python tools, until the
+open items below are resolved.
 
-`mkbd-pair dbus-pair` ran end to end on the physical keyboard:
+`mkbd-pair dbus-pair` ran end to end on the physical keyboard, twice:
 `AddRemoteLegacyOOB` → `ConnectDevice` → `Device1.Pair()` →
-`Paired=true Bonded=true Connected=true`, full GATT resolution (HID, Battery
-at 88%, Device Information, the vendor service), and a live
-`bluez-hog-device` uhid keyboard input device — bluetoothd never stopped.
-One bug found and fixed in that first run: `zbus`'s `#[proxy]` macro
-PascalCases each snake_case segment of a Rust method name to derive the
-D-Bus method name, and does not know `oob` should stay all-caps — it turned
-`add_remote_legacy_oob` into `AddRemoteLegacyOob`, which BlueZ rejected with
-`UnknownMethod`. Fixed with an explicit `#[zbus(name = "AddRemoteLegacyOOB")]`
-override. No other proxy method needed one (none of the others have an
-all-caps segment).
-
-`pair` (both engines), `adopt`, and `auto` have **not** been hardware-tested
-yet — see "Known-unverified" below for what's most likely to need a similar
-one-line fix once they are.
+`Paired=true Bonded=true Connected=true`, full GATT resolution (HID, Battery,
+Device Information, the vendor service), and a live `bluez-hog-device` uhid
+keyboard input device — bluetoothd never stopped. `mkbd-pair auto` reproduced
+the same pairing result end to end (prompt → pair → info dialog). What's
+**not yet working**: after the info dialog is dismissed and the USB cable is
+unplugged, the keyboard did not reconnect over Bluetooth within the 90s
+watch window, even though the bond stayed intact
+(`Paired/Bonded/Trusted: yes`, `Connected: no`). Current best hypothesis: the
+raw-mgmt path this crate no longer has explicitly ran a GATT
+connect→subscribe-CCCDs→hold-until-drop sequence (`adopt`, née "phase 4")
+before ever telling the user to unplug, which is apparently what makes the
+keyboard actually commit to and start advertising on its new address; the
+D-Bus path relies on bluetoothd's own HOGP profile doing the equivalent
+implicitly, which this test suggests may not be reliable without that
+explicit hold. Worth trying: chain `adopt` after `dbus-pair` inside `auto`,
+the same way the (now-removed) raw-mgmt engine used to. Not yet done.
 
 ## What this replaces
 
 | Python / bash | Rust | Notes |
 |---|---|---|
-| `lib/mkbd_common.py` | `src/hid.rs`, `src/mgmt.rs`, `src/bond.rs`, `src/bdaddr.rs` | hidraw discovery/ioctls, F1/F2/F3 exchange, MGMT control socket, BlueZ bond-file writer |
-| `test/tk-pair.py` | `src/pair.rs` (`Engine::DebugfsTk`) | debugfs TK-injection PoC path |
-| `test/optionA-pair.py` | `src/pair.rs` (`Engine::OptionA`) | the real `MGMT_OP_ADD_REMOTE_OOB_DATA` len-88 path |
-| `test/phase4.py` | `src/att.rs` (`run_adopt`) | bonded GATT provisioning / address adoption over raw L2CAP ATT |
-| `pairmodernkeyboard.sh` | `mkbd-pair pair` | CLI wrapper folded into the engine itself |
-| `test/optionA-dbus-pair.py` | `src/dbus_pair.rs` (`mkbd-pair dbus-pair`) | Option A over bluetoothd's D-Bus surface, bluetoothd never stopped |
-| `optionA/autopair/mkbd-optionA-autopair` | `mkbd-pair auto` (`src/autopair.rs`) | udev-triggered detect/prompt/pair/confirm/reconnect-watch; tries D-Bus first, falls back to raw-mgmt |
+| `lib/mkbd_common.py` (hidraw/F1-F2-F3 parts) | `src/hid.rs`, `src/bond.rs`, `src/bdaddr.rs` | hidraw discovery/ioctls, F1/F2/F3 exchange, BlueZ device lookup/cleanup |
+| `test/phase4.py` | `src/att.rs` (`mkbd-pair adopt`) | bonded GATT provisioning / address adoption over raw L2CAP ATT |
+| `test/optionA-dbus-pair.py` | `src/dbus_pair.rs` (`mkbd-pair dbus-pair`) | Option A pairing over bluetoothd's D-Bus surface, bluetoothd never stopped — **the only pairing engine in this crate** |
+| `optionA/autopair/mkbd-optionA-autopair` | `mkbd-pair auto` (`src/autopair.rs`) | udev-triggered detect/prompt/pair/confirm/reconnect-watch |
 
-`lib/mkbd_common.py`'s BR/EDR helpers (`write_device_info`,
-`mgmt_load_link_keys`/`mgmt_load_ltks`/`mgmt_load_irks`) and the report
-descriptor mini-parser were **not** ported — nothing in the pairing engine
-calls them; they exist in Python for other tools outside this repo's scope.
+**Removed after hardware testing:** `test/tk-pair.py` (debugfs TK-injection
+PoC), `test/optionA-pair.py` (raw `MGMT_OP_ADD_REMOTE_OOB_DATA`), and
+`pairmodernkeyboard.sh` were all initially ported (as `src/pair.rs` +
+`src/mgmt.rs`, an `Engine::DebugfsTk`/`Engine::OptionA` raw-mgmt pairing
+path, and `auto`'s fallback to it) but then deleted. Reason: that path masks
+`bluetooth.service` for the duration of every pairing attempt, and an
+earlier test session's raw-mgmt run left it *masked and stopped* afterward —
+which doesn't self-heal, breaks Bluetooth system-wide, and needs a manual
+`systemctl unmask bluetooth && systemctl start bluetooth` to recover. Given
+`dbus-pair` (bluetoothd never stopped) is hardware-proven and covers the same
+ground, the raw-mgmt path wasn't worth the operational risk. See git history
+on this branch for the removed `pair.rs`/`mgmt.rs` if that path is ever
+needed again (e.g. to support a kernel that only has the Option A patches and
+not the BlueZ D-Bus patch).
+
+`lib/mkbd_common.py`'s BR/EDR helpers, its MGMT key-loader functions, the
+bond-file writer (bluetoothd manages the bond file itself on the D-Bus path),
+and the report descriptor mini-parser were **not** ported — nothing left in
+this crate calls them.
 
 ## CLI
 
 ```
-mkbd-pair pair [--option-a] [--tk-order as-is|reversed] [--addr-type 0|1]
-               [--timeout N] [--diag] [--no-mask] [--no-adopt]
-               [--adopt-rounds N] [--hci hci0] [--adapter ADDR]
+mkbd-pair dbus-pair [--hci hci0] [--adapter ADDR] [--tk-order as-is|reversed]
+                    [--connect-timeout SECS] [--pair-timeout SECS]
 
 mkbd-pair adopt <KBD_ADDR> [--adapter ADDR] [--hci hci0] [--rounds N]
                 [--hold SECS] [--discover] [--writes] [--read-msacc]
                 [--f3-check] [--cccd 0x17,0x1d,...] [--led H] [--feature H]
                 [--notify H] [--led-writes N] [--msacc H,H]
 
-mkbd-pair dbus-pair [--hci hci0] [--adapter ADDR] [--tk-order as-is|reversed]
-                    [--connect-timeout SECS] [--pair-timeout SECS]
-
 mkbd-pair auto [--hci hci0] [--reconnect-timeout SECS]
 ```
 
-`mkbd-pair pair` defaults to the debugfs PoC path, matching
-`pairmodernkeyboard.sh`'s default; pass `--option-a` for the real kernel-patch
-path (what `mkbd-pair auto` always uses, matching the bash wrapper it
-replaces).
+`mkbd-pair auto` always uses `dbus-pair` — there is no fallback engine left
+to try.
 
-## Naming: "Phase 0" / "Phase 4" → debugfs / Option A / address adoption
+## Naming: "Phase 0" / "Phase 4" → Option A / address adoption
 
 `PLAN.md`'s numbered phases (0, 1, 2, 4) are a project roadmap, not a naming
-scheme worth carrying into a CLI a new user has to read cold. This port keeps
-**Option A** (already a meaningful, established name across `optionA/`,
-`BLUEZ-NOTES.md`, etc.) but renames:
+scheme worth carrying into a CLI a new user has to read cold. "Phase 0" (the
+debugfs PoC) went away entirely with the raw-mgmt engine removal. "Phase 4"
+is now **`adopt` / "address adoption"** — what it actually does: hold a
+bonded GATT connection long enough that the keyboard adopts the new address
+generated during F3. Comments that cite the Python filenames
+(`test/phase4.py`, etc.) for traceability were left alone — those are real
+paths, not phase numbers.
 
-- "Phase 0" → **`Engine::DebugfsTk`** / "the debugfs TK-injection knob" — it's
-  the throwaway PoC path that pokes a debugfs file, as opposed to Option A's
-  real MGMT opcode.
-- "Phase 4" → **`adopt` / "address adoption"** — what it actually does: hold a
-  bonded GATT connection long enough that the keyboard adopts the new address
-  generated during F3. `--p4-rounds` → `--adopt-rounds`, `--no-phase4` →
-  `--no-adopt`.
+## `dbus-pair` (ported from `worktree-kernel-leak-fix`, then hardware-verified here)
 
-Comments that cite the Python filenames (`test/phase4.py`, etc.) for
-traceability were left alone — those are real paths, not phase numbers.
+Another session's branch (`worktree-kernel-leak-fix`, PR #2, commit
+`af3523e`/`e3e7357`) hardware-verified the key fix this engine depends on,
+ported here directly from those commits (not re-derived from a description):
+**`Adapter1.ConnectDevice()` instead of `Adapter1.StartDiscovery()`**. The
+original attempt used `StartDiscovery()` + polling for a `Device1` object
+and failed 5/5 on hardware — BlueZ's discovery pipeline never saw the
+keyboard's directed advertisement. `ConnectDevice()` (a stock,
+`[experimental]`-flagged BlueZ method: "Connects to device without need of
+performing General Discovery") connects directly by address instead, and was
+verified end to end. Ported as `src/dbus_pair.rs` / `mkbd-pair dbus-pair`,
+using `zbus`'s blocking API (async-io reactor, no tokio, no libdbus) — the
+`ConnectDevice`/`Pair()` calls run on a helper thread with a channel-based
+timeout, mirroring the client-side `timeout=` kwargs the Python version
+passes to dbus-python.
 
-## `dbus-pair` and the `auto` fallback (ported from `worktree-kernel-leak-fix`)
+This session then ran `mkbd-pair dbus-pair` against the physical keyboard
+and reproduced that exact result on the first hardware run **after fixing
+one bug**: zbus's `#[proxy]` macro derives a D-Bus method name by PascalCasing
+each snake_case segment of the Rust method name and doesn't know `oob`
+should stay all-caps, so `add_remote_legacy_oob` became `AddRemoteLegacyOob`
+and BlueZ rejected it with `UnknownMethod`. Fixed with an explicit
+`#[zbus(name = "AddRemoteLegacyOOB")]` override — worth remembering as a
+general lesson for any future zbus proxy method here: check the derived name
+against the real D-Bus method name whenever the interface has an acronym or
+other non-standard capitalization.
 
-Another session's branch (`worktree-kernel-leak-fix`, PR #2, commits
-`331e28e`/`af3523e`/`e3e7357`) hardware-verified two fixes on top of what this
-crate started from; both are ported here directly from those commits (not
-re-derived from a description):
+A second, unrelated bug also turned up on the second hardware run:
+`Device1.Pair()` failed with `org.bluez.Error.AlreadyExists`, traced to a
+stale `Paired=true` Device1 object left behind under a *different*,
+previously-used address (the keyboard hands out a new address every time the
+F1/F2/F3 exchange runs, so repeated test/pairing runs leave a trail of stale
+device entries in bluetoothd). Fixed with
+`bond::remove_matching_bluez_devices()`, which enumerates `bluetoothctl
+devices`, matches each against the keyboard's stable identity (resolved GAP
+name, Bluetooth-side PnP ID, vendor-specific GATT service UUID — not its
+ever-changing address) and removes matches via `bluetoothctl remove` before
+anything else runs; called as the first action in `dbus_pair::run_dbus_pair`.
 
-1. **The D-Bus pairing path works with `Adapter1.ConnectDevice()`.** The
-   original attempt used `Adapter1.StartDiscovery()` + polling for a
-   `Device1` object and failed 5/5 on hardware — BlueZ's discovery pipeline
-   never saw the keyboard's directed advertisement. `ConnectDevice()` (a
-   stock, `[experimental]`-flagged BlueZ method: "Connects to device without
-   need of performing General Discovery") connects directly by address
-   instead, the same mechanism the raw-mgmt path already uses, and was
-   verified end to end on the Python original: `AddRemoteLegacyOOB` →
-   `ConnectDevice` (0.1s) → `Device1.Pair()` →
-   `Paired=true Bonded=true Connected=true`, full GATT resolution, live
-   `uhid` input device, bluetoothd never stopped. Ported as
-   `src/dbus_pair.rs` / `mkbd-pair dbus-pair`, using `zbus`'s blocking API
-   (async-io reactor, no tokio, no libdbus) — the `ConnectDevice`/`Pair()`
-   calls run on a helper thread with a channel-based timeout, mirroring the
-   client-side `timeout=` kwargs the Python version passes to dbus-python.
-   `mkbd-pair auto` now tries this path first and falls back to
-   `pair::Engine::OptionA` (raw mgmt, bluetoothd stopped) on failure — the
-   fallback exists because this keyboard abandons its currently active bond
-   as soon as a new F1/F2/F3 exchange starts regardless of outcome, so a
-   failed D-Bus attempt has already cost the bond either way, and falling
-   straight back to the proven path re-establishes it in the same run.
-2. **`mgmt_pair_device` now sends `MGMT_OP_CANCEL_PAIR_DEVICE` +
-   `MGMT_OP_DISCONNECT`** for the peer whenever it's about to return without
-   a confirmed bond (no LTK). Root cause: both the in-flight bonding request
-   and the underlying LE connection are kernel state tracked per-adapter, not
-   per-socket, so closing the raw HCI socket on a failed/timed-out attempt
-   left them running for the next attempt to collide with — the suspected
-   cause of the "repeated attempts degrade, only a reboot fixes it" symptom
-   ("ACL packet for unknown connection handle" in dmesg). This one **has not
-   been hardware-stress-tested on either branch** as of this port — it's a
-   strong hypothesis with a concrete, low-risk fix (send two more mgmt
-   commands on an already-failing path), not a confirmed fix.
-
-Update 2026-09-12: `mkbd-pair dbus-pair` itself has now been run on the
-physical keyboard and reproduced that exact result (see the status note at
-the top of this file) — the one bug it turned up (a zbus method-name-casing
-mismatch) is fixed. The `MGMT_OP_CANCEL_PAIR_DEVICE`/`DISCONNECT` fix above
-is still unverified on both branches.
+The peer branch's other finding — `mgmt_pair_device` sending
+`MGMT_OP_CANCEL_PAIR_DEVICE`/`MGMT_OP_DISCONNECT` to avoid leaking kernel
+connection state across failed raw-mgmt attempts — no longer applies: the
+raw-mgmt engine it patched was removed (see above).
 
 ## Differences from the Python tools (deliberate)
 
-- **`auto` calls the engine in-process** instead of shelling out to
-  `pairmodernkeyboard.sh` and grepping its stdout for a summary line. The
-  address and pass/fail come directly off the returned `PairOutcome` struct.
-- **`mkbd-pair pair` always prints full detail**, then a compact 3-line
-  summary at the end (address / authenticated+CCCD-count+adopted /
-  reminder), rather than `pairmodernkeyboard.sh`'s default of burying full
-  output in a temp log unless `-v`/`--diag` is passed. There's no
-  process boundary to redirect across anymore, so there was no cheap way to
-  keep the "quiet by default" behavior — decided full-output-always was the
-  more useful default for a systems tool. Flag if you'd rather have quiet
-  default back.
+- **`auto` calls the engine in-process** instead of shelling out to a wrapper
+  script and grepping its stdout for a summary line. The address and
+  pass/fail come directly off the returned `DbusPairOutcome` struct.
+- **Stale-device cleanup runs automatically before every pairing attempt**
+  (`bond::remove_matching_bluez_devices()`), which none of the Python tools
+  do — added after hitting the `AlreadyExists` failure above during hardware
+  testing of this port, not present in the Python originals.
 
 ## Known-unverified / lower-confidence spots
 
-Everything here is unverified on hardware, but these are the parts most
-likely to need a fix on first real run:
-
-- **`sock.rs`**: hand-written `sockaddr_hci` / `sockaddr_l2cap` structs and
-  raw `libc::socket`/`bind`/`connect`/`setsockopt` calls, since Rust's
-  `std::net` has no `AF_BLUETOOTH` support. Field layout and constants
-  (`AF_BLUETOOTH=31`, `BTPROTO_L2CAP=0`, `BTPROTO_HCI=1`, `SOL_BLUETOOTH=274`,
-  `BT_SECURITY=4`) were cross-checked against `<bluetooth/*.h>` and against
-  what `lib/mkbd_common.py` / `test/phase4.py` pass through Python's
-  `socket` module, but never round-tripped against a real kernel.
-- **L2CAP connect with a timeout**: implemented as
-  non-blocking-connect + `poll(POLLOUT)` + `SO_ERROR` check, since
-  `SO_SNDTIMEO` doesn't reliably bound `connect()` on Linux. Python relied on
-  `socket.settimeout()` before `connect()`, which does the equivalent under
-  the hood — the Rust version should behave the same but wasn't compared
-  side by side.
+- **Reconnect-after-unplug in `auto`**: hardware-tested and **did not work**
+  within the 90s watch window on the one run tried — see the status note at
+  the top of this file. This is the main open item.
+- **`adopt` (`src/att.rs`)**: not yet run standalone against hardware. If the
+  reconnect-after-unplug hypothesis above is right, chaining `adopt` after
+  `dbus-pair` (inside `auto`, before telling the user to unplug) is the
+  likely fix — but `adopt` itself needs verifying first.
+- **`sock.rs`**: hand-written `sockaddr_l2cap` struct and raw
+  `libc::socket`/`bind`/`connect`/`setsockopt` calls for the L2CAP ATT
+  channel `adopt` uses, since Rust's `std::net` has no `AF_BLUETOOTH`
+  support. Cross-checked against `<bluetooth/*.h>` and against what
+  `test/phase4.py` passes through Python's `socket` module, but not yet
+  round-tripped against a real kernel.
+- **L2CAP connect with a timeout**: implemented as non-blocking-connect +
+  `poll(POLLOUT)` + `SO_ERROR` check, since `SO_SNDTIMEO` doesn't reliably
+  bound `connect()` on Linux. Python relied on `socket.settimeout()` before
+  `connect()`, which does the equivalent under the hood — the Rust version
+  should behave the same but wasn't compared side by side.
 - **hidraw ioctl request codes** (`hid.rs`'s `ioc()`): reimplements the
   `_IOC` macro from `<linux/ioctl.h>` bit-for-bit against Python's version;
-  only `HIDIOCSFEATURE` is exercised by the pairing engine (matches
-  `mkbd_common.py`, which only calls `set_feature` from this path too).
-- **`mgmt_pair_device`'s event loop timing** (`mgmt.rs`): ported the
-  grace-period logic around `MGMT_EV_NEW_LTK` arriving before or after the
-  Pair Device Command Complete verbatim from the Python comments describing
-  real hardware behavior — but the *comments* are the only evidence this
-  matters, so if pairing seems to cut off the LTK/IRK race early, look here
-  first.
-- **`btmon`/`dmesg` capture for `--diag`**: reimplemented but not exercised;
-  a wrong parse of `btmon -r`/`dmesg` output only degrades diagnostics, not
-  the pairing result.
-- ~~**`src/dbus_pair.rs`'s zbus usage**~~ — **hardware-verified 2026-09-12.**
-  Ran end to end first try after one fix: zbus's `#[proxy]` macro derives a
-  D-Bus method name by PascalCasing each snake_case segment and doesn't know
-  `oob` should stay all-caps, so `add_remote_legacy_oob` became
-  `AddRemoteLegacyOob` and BlueZ returned `UnknownMethod` — fixed with
-  `#[zbus(name = "AddRemoteLegacyOOB")]`. Worth remembering as a general
-  lesson for *any* future zbus proxy method here: check the derived name
-  against the real D-Bus method name whenever the interface has an acronym
-  or other non-standard capitalization, don't assume the derivation is
-  right. The `Agent1` object was exported and registered but never
-  exercised (RequestConfirmation etc. weren't called) — this keyboard's OOB
-  pairing doesn't need agent interaction, matching the Python original's own
-  experience, so that part of `dbus_pair.rs` remains unverified.
+  only `HIDIOCSFEATURE` is exercised (matches `mkbd_common.py`, which only
+  calls `set_feature` from this path too) — this part IS hardware-proven,
+  since both `dbus-pair` runs used it for the F1/F2/F3 exchange.
+- **`btmon`/`dmesg` capture**: no longer wired to anything (it was
+  `pair`'s `--diag` flag, removed with the raw-mgmt engine); the code for it
+  went with `pair.rs`.
 
 ## Building
 
@@ -200,20 +181,20 @@ cargo build --release
 # binary at target/release/mkbd-pair
 ```
 
-No system dependencies beyond a Rust toolchain — `libc` and `clap` are the
-only crates, both resolved from crates.io at build time (not a runtime
-dependency of the resulting binary).
+No system dependencies beyond a Rust toolchain — `libc`, `clap`, and `zbus`
+are resolved from crates.io at build time (not a runtime dependency of the
+resulting binary).
 
 ## Trying it (once you're ready to test against hardware)
 
-Everything needs root, same as the Python tools. Point it at the same
-prerequisites (`test/install-module.sh` or `test/install-optionA-module.sh` +
-reboot, keyboard on USB):
+Everything needs root. Needs bluetoothd running with `--experimental` and
+the `AddRemoteLegacyOOB` D-Bus method (`optionA/bluez/0001-*.patch` /
+`test/install-optionA-bluetoothd.sh`), and the keyboard on USB (045e:0815):
 
 ```
-sudo target/release/mkbd-pair pair --option-a --diag
+sudo target/release/mkbd-pair dbus-pair
 ```
 
-If something doesn't match `test/optionA-pair.py`'s behavior byte-for-byte,
-that's the port to fix — the Python tools remain the reference implementation
-until this one is proven out.
+If something doesn't match `test/optionA-dbus-pair.py`'s behavior, that's the
+port to fix — the Python tools remain the reference implementation until this
+one is fully proven out.

@@ -1,8 +1,19 @@
 //! mkbd-pair — Rust port of this repo's Microsoft Modern Keyboard (Fingerprint
-//! ID, model 1780) pairing tools: lib/mkbd_common.py, test/tk-pair.py,
-//! test/optionA-pair.py, test/phase4.py, pairmodernkeyboard.sh, and the
-//! optionA/autopair udev/zenity wrapper, folded into one binary. See
-//! rust/mkbd-pair/README.md for scope, status, and what is NOT wired in yet.
+//! ID, model 1780) pairing tools: lib/mkbd_common.py, test/phase4.py,
+//! test/optionA-dbus-pair.py, and the optionA/autopair udev/zenity wrapper,
+//! folded into one binary. See rust/mkbd-pair/README.md for scope, status,
+//! and what is NOT wired in yet.
+//!
+//! The raw-mgmt pairing engines (test/tk-pair.py's debugfs path,
+//! test/optionA-pair.py's MGMT_OP_ADD_REMOTE_OOB_DATA path, and
+//! pairmodernkeyboard.sh) were ported here initially but removed after
+//! hardware testing: they require stopping/masking bluetoothd for the
+//! duration of the pair, and a masked-but-not-restored bluetooth.service
+//! from an earlier such run broke Bluetooth entirely until manually
+//! unmasked. The D-Bus path (`dbus-pair`) never touches bluetoothd's running
+//! state and is hardware-verified working, so it's the only pairing engine
+//! left. See git history (this crate's earlier commits) for the removed
+//! mgmt.rs/pair.rs if that path is ever needed again.
 
 mod att;
 mod autopair;
@@ -11,14 +22,11 @@ mod bond;
 mod dbus_pair;
 mod hid;
 mod log;
-mod mgmt;
-mod pair;
 mod sock;
 
 use att::{AdoptOpts, CCCD_HANDLES, H_FEATURE, H_LED, H_MSACC, H_NOTIFY};
 use autopair::AutoOpts;
 use clap::{Parser, Subcommand};
-use pair::{Engine, PairOpts};
 
 /// Format like Python's `%g` for the small set of values this tool prints
 /// (hold/timeout seconds) — integral values print without a decimal point.
@@ -39,47 +47,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Pair the keyboard: USB F1/F2/F3 -> inject the TK -> MGMT Pair Device -> bond -> address adoption.
-    /// Replaces `sudo ./pairmodernkeyboard.sh` / `test/tk-pair.py` / `test/optionA-pair.py`.
-    Pair(PairArgs),
     /// Standalone bonded GATT provisioning: subscribe CCCDs and hold the link until the
     /// keyboard adopts its new address. Replaces `test/phase4.py`.
     Adopt(AdoptArgs),
-    /// Option A pairing through bluetoothd's own D-Bus surface (AddRemoteLegacyOOB +
+    /// Pair the keyboard through bluetoothd's own D-Bus surface (AddRemoteLegacyOOB +
     /// ConnectDevice), bluetoothd never stopped. Replaces `test/optionA-dbus-pair.py`.
     DbusPair(DbusPairArgs),
-    /// udev-triggered detect -> prompt -> pair -> confirm -> reconnect-watch flow. Tries
-    /// the D-Bus path first, falls back to raw-mgmt Option A. Replaces
-    /// optionA/autopair/mkbd-optionA-autopair.
+    /// udev-triggered detect -> prompt -> pair -> confirm -> reconnect-watch flow.
+    /// Replaces optionA/autopair/mkbd-optionA-autopair.
     Auto(AutoArgs),
-}
-
-#[derive(clap::Args)]
-struct PairArgs {
-    #[arg(long, default_value = "hci0")]
-    hci: String,
-    #[arg(long, help = "local adapter bdaddr (default: hci0's)")]
-    adapter: Option<String>,
-    /// Use the Option A path (MGMT_OP_ADD_REMOTE_OOB_DATA) instead of the debugfs TK-injection knob.
-    #[arg(long = "option-a")]
-    option_a: bool,
-    #[arg(long = "tk-order", value_parser = ["as-is", "reversed"], default_value = "as-is")]
-    tk_order: String,
-    #[arg(long = "addr-type", value_parser = clap::value_parser!(u8).range(0..=1), default_value_t = 1)]
-    addr_type: u8,
-    #[arg(long, default_value_t = 30)]
-    timeout: u64,
-    /// Capture btmon + dump the filtered SMP trace and dmesg.
-    #[arg(long)]
-    diag: bool,
-    /// Do NOT mask/stop bluetooth.service during the pair.
-    #[arg(long = "no-mask")]
-    no_mask: bool,
-    /// Stop after the pair; skip GATT provisioning / address adoption.
-    #[arg(long = "no-adopt")]
-    no_adopt: bool,
-    #[arg(long = "adopt-rounds", default_value_t = 1)]
-    adopt_rounds: u32,
 }
 
 #[derive(clap::Args)]
@@ -150,60 +126,11 @@ fn parse_int(s: &str) -> Result<u16, String> {
 fn main() {
     let cli = Cli::parse();
     let code = match cli.cmd {
-        Cmd::Pair(a) => run_pair_cmd(a),
         Cmd::Adopt(a) => run_adopt_cmd(a),
         Cmd::DbusPair(a) => run_dbus_pair_cmd(a),
         Cmd::Auto(a) => run_auto_cmd(a),
     };
     std::process::exit(code);
-}
-
-fn run_pair_cmd(a: PairArgs) -> i32 {
-    let opts = PairOpts {
-        engine: if a.option_a { Engine::OptionA } else { Engine::DebugfsTk },
-        hci: a.hci,
-        adapter: a.adapter,
-        tk_reversed: a.tk_order == "reversed",
-        addr_type: a.addr_type,
-        timeout: a.timeout,
-        diag: a.diag,
-        no_mask: a.no_mask,
-        no_adopt: a.no_adopt,
-        adopt_rounds: a.adopt_rounds,
-    };
-    match pair::run_pair(&opts) {
-        Ok(o) => {
-            print_summary(&o, opts.no_adopt);
-            0
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            1
-        }
-    }
-}
-
-/// The pairmodernkeyboard.sh-style 3-line summary, built from the returned
-/// `PairOutcome` instead of grepping a captured log — this now runs
-/// in-process, so the structured result is already at hand.
-fn print_summary(o: &pair::PairOutcome, no_adopt: bool) {
-    let auth = if o.authenticated { "authenticated" } else { "UNAUTHENTICATED" };
-    let line2 = if no_adopt {
-        format!("paired ({auth}) · address adoption skipped")
-    } else if let Some(a) = &o.adopt {
-        let cccd = format!("{}/{} CCCDs", a.cccd_ok, a.cccd_total);
-        match a.adopted {
-            Some(true) => format!("paired ({auth}) · {cccd} · address ADOPTED"),
-            Some(false) => format!("paired ({auth}) · {cccd} · address NOT adopted (retry, or --adopt-rounds 2)"),
-            None => format!("paired ({auth}) · {cccd}"),
-        }
-    } else {
-        format!("paired ({auth})")
-    };
-    println!();
-    println!("Modern Keyboard  ·  {}", o.addr);
-    println!("{line2}");
-    println!("unplug USB & power-cycle the keyboard — it reconnects on its own");
 }
 
 fn run_adopt_cmd(a: AdoptArgs) -> i32 {
@@ -241,7 +168,14 @@ fn run_adopt_cmd(a: AdoptArgs) -> i32 {
         eprintln!("error: run as root");
         return 1;
     }
-    att::run_adopt(&opts);
+    let result = att::run_adopt(&opts);
+    println!();
+    println!("{}/{} CCCDs subscribed", result.cccd_ok, result.cccd_total);
+    match result.adopted {
+        Some(true) => println!("address ADOPTED"),
+        Some(false) => println!("address NOT adopted (retry, or --rounds 2)"),
+        None => {}
+    }
     0
 }
 
