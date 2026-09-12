@@ -53,6 +53,10 @@ trait ObjectManager {
 trait Adapter1 {
     #[zbus(property)]
     fn powered(&self) -> zbus::fdo::Result<bool>;
+    // zbus's default snake_case -> PascalCase name derivation capitalizes only the
+    // first letter of "oob", giving "AddRemoteLegacyOob" — override explicitly to
+    // match the actual method name the optionA/bluez patch registers.
+    #[zbus(name = "AddRemoteLegacyOOB")]
     fn add_remote_legacy_oob(&self, address: &str, address_type: &str, tk: &[u8]) -> zbus::Result<()>;
     fn connect_device(&self, properties: HashMap<&str, Value<'_>>) -> zbus::Result<OwnedObjectPath>;
 }

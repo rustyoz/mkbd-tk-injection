@@ -5,13 +5,29 @@ ID, model 1780) pairing tools, built for eventual release packaging (see
 `../../PLUGIN-PLAN.md` section 2, "Userspace → `mkbd-pair`"). One static
 binary instead of a Python engine + a vendored library + two bash wrappers.
 
-**Status: NOT wired in.** `../../pairmodernkeyboard.sh` and
-`../../optionA/autopair/mkbd-optionA-autopair` are untouched and remain the
-hardware-verified tools. This binary has not been run against the physical
-keyboard — it compiles clean and its pure logic (bdaddr parsing) has unit
-tests, but every USB/mgmt-socket/L2CAP code path is an unverified port. Do
-not point udev or a systemd unit at it, and do not delete the Python tools,
-until it's been exercised on real hardware and someone says to cut over.
+**Status: `dbus-pair` is hardware-verified (2026-09-12); everything else is
+still unverified, and none of it is wired in.** `../../pairmodernkeyboard.sh`
+and `../../optionA/autopair/mkbd-optionA-autopair` are untouched and remain
+the tools actually wired to udev/systemd. Do not point those at this binary,
+and do not delete the Python tools, until each path below has been exercised
+on real hardware.
+
+`mkbd-pair dbus-pair` ran end to end on the physical keyboard:
+`AddRemoteLegacyOOB` → `ConnectDevice` → `Device1.Pair()` →
+`Paired=true Bonded=true Connected=true`, full GATT resolution (HID, Battery
+at 88%, Device Information, the vendor service), and a live
+`bluez-hog-device` uhid keyboard input device — bluetoothd never stopped.
+One bug found and fixed in that first run: `zbus`'s `#[proxy]` macro
+PascalCases each snake_case segment of a Rust method name to derive the
+D-Bus method name, and does not know `oob` should stay all-caps — it turned
+`add_remote_legacy_oob` into `AddRemoteLegacyOob`, which BlueZ rejected with
+`UnknownMethod`. Fixed with an explicit `#[zbus(name = "AddRemoteLegacyOOB")]`
+override. No other proxy method needed one (none of the others have an
+all-caps segment).
+
+`pair` (both engines), `adopt`, and `auto` have **not** been hardware-tested
+yet — see "Known-unverified" below for what's most likely to need a similar
+one-line fix once they are.
 
 ## What this replaces
 
@@ -85,9 +101,10 @@ re-derived from a description):
    stock, `[experimental]`-flagged BlueZ method: "Connects to device without
    need of performing General Discovery") connects directly by address
    instead, the same mechanism the raw-mgmt path already uses, and was
-   verified end to end: `AddRemoteLegacyOOB` → `ConnectDevice` (0.1s) →
-   `Device1.Pair()` → `Paired=true Bonded=true Connected=true`, full GATT
-   resolution, live `uhid` input device, bluetoothd never stopped. Ported as
+   verified end to end on the Python original: `AddRemoteLegacyOOB` →
+   `ConnectDevice` (0.1s) → `Device1.Pair()` →
+   `Paired=true Bonded=true Connected=true`, full GATT resolution, live
+   `uhid` input device, bluetoothd never stopped. Ported as
    `src/dbus_pair.rs` / `mkbd-pair dbus-pair`, using `zbus`'s blocking API
    (async-io reactor, no tokio, no libdbus) — the `ConnectDevice`/`Pair()`
    calls run on a helper thread with a channel-based timeout, mirroring the
@@ -110,9 +127,11 @@ re-derived from a description):
    strong hypothesis with a concrete, low-risk fix (send two more mgmt
    commands on an already-failing path), not a confirmed fix.
 
-The D-Bus path is new surface with its own unverified-in-this-port status
-(see below) on top of being unverified-by-this-session in general — treat it
-as two layers of "needs a real hardware run before trusting it."
+Update 2026-09-12: `mkbd-pair dbus-pair` itself has now been run on the
+physical keyboard and reproduced that exact result (see the status note at
+the top of this file) — the one bug it turned up (a zbus method-name-casing
+mismatch) is fixed. The `MGMT_OP_CANCEL_PAIR_DEVICE`/`DISCONNECT` fix above
+is still unverified on both branches.
 
 ## Differences from the Python tools (deliberate)
 
@@ -159,16 +178,19 @@ likely to need a fix on first real run:
 - **`btmon`/`dmesg` capture for `--diag`**: reimplemented but not exercised;
   a wrong parse of `btmon -r`/`dmesg` output only degrades diagnostics, not
   the pairing result.
-- **`src/dbus_pair.rs`'s zbus usage**: the D-Bus method signatures
-  (`Adapter1.AddRemoteLegacyOOB(s,s,ay)`, `Adapter1.ConnectDevice(a{sv})->o`,
-  `AgentManager1`/`Agent1`) were cross-checked against the actual BlueZ patch
-  (`optionA/bluez/0001-*.patch`) and the verified Python script, and it
-  compiles/links against zbus 5.19's blocking API — but this exact Rust
-  translation (proxy macros, the exported `Agent1` object, the
-  thread+channel timeout wrapper around `ConnectDevice`/`Pair()`) has not
-  been run against a live system bus or bluetoothd at all. If pairing hangs
-  rather than failing cleanly, or the agent never gets a callback it should,
-  start here.
+- ~~**`src/dbus_pair.rs`'s zbus usage**~~ — **hardware-verified 2026-09-12.**
+  Ran end to end first try after one fix: zbus's `#[proxy]` macro derives a
+  D-Bus method name by PascalCasing each snake_case segment and doesn't know
+  `oob` should stay all-caps, so `add_remote_legacy_oob` became
+  `AddRemoteLegacyOob` and BlueZ returned `UnknownMethod` — fixed with
+  `#[zbus(name = "AddRemoteLegacyOOB")]`. Worth remembering as a general
+  lesson for *any* future zbus proxy method here: check the derived name
+  against the real D-Bus method name whenever the interface has an acronym
+  or other non-standard capitalization, don't assume the derivation is
+  right. The `Agent1` object was exported and registered but never
+  exercised (RequestConfirmation etc. weren't called) — this keyboard's OOB
+  pairing doesn't need agent interaction, matching the Python original's own
+  experience, so that part of `dbus_pair.rs` remains unverified.
 
 ## Building
 
