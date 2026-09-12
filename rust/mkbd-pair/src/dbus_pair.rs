@@ -300,8 +300,9 @@ pub fn run_dbus_pair(opts: &DbusPairOpts) -> Result<DbusPairOutcome, String> {
                 "ConnectDevice failed: {e}\n  \
                  NotSupported usually means bluetoothd is not running with --experimental \
                  (ConnectDevice is an experimental BlueZ method).\n  \
-                 If this still can't reach the keyboard, `mkbd-pair pair --option-a` \
-                 (the raw-mgmt path) remains the one known to work."
+                 A timeout usually means the keyboard isn't advertising to this adapter \
+                 right now — check it's on USB and the F1/F2/F3 exchange above succeeded, \
+                 then retry."
             ));
         }
     };

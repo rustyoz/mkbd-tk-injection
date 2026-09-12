@@ -5,32 +5,41 @@ ID, model 1780) pairing tools, built for eventual release packaging (see
 `../../PLUGIN-PLAN.md` section 2, "Userspace → `mkbd-pair`"). One static
 binary instead of a Python engine + a vendored library + two bash wrappers.
 
-**Status: `dbus-pair` and `auto`'s pairing step are hardware-verified
-(2026-09-12); the reconnect-after-unplug leg of `auto` is not, and `adopt`
-hasn't been exercised standalone. None of it is wired in** —
-`../../pairmodernkeyboard.sh` and `../../optionA/autopair/mkbd-optionA-autopair`
-are untouched and remain the tools actually wired to udev/systemd. Do not
-point those at this binary, and do not delete the Python tools, until the
-open items below are resolved.
+**Status: `mkbd-pair auto`'s full flow — detect, prompt, pair via D-Bus,
+unplug, reconnect over Bluetooth — is hardware-verified end to end
+(2026-09-12). `adopt` hasn't been exercised standalone. None of it is wired
+in** — `../../pairmodernkeyboard.sh` and
+`../../optionA/autopair/mkbd-optionA-autopair` are untouched and remain the
+tools actually wired to udev/systemd. Do not point those at this binary, and
+do not delete the Python tools, until it's proven reliable across more runs
+(see the flakiness note below).
 
-`mkbd-pair dbus-pair` ran end to end on the physical keyboard, twice:
+`mkbd-pair dbus-pair` ran end to end on the physical keyboard, several times:
 `AddRemoteLegacyOOB` → `ConnectDevice` → `Device1.Pair()` →
 `Paired=true Bonded=true Connected=true`, full GATT resolution (HID, Battery,
 Device Information, the vendor service), and a live `bluez-hog-device` uhid
-keyboard input device — bluetoothd never stopped. `mkbd-pair auto` reproduced
-the same pairing result end to end (prompt → pair → info dialog). What's
-**not yet working**: after the info dialog is dismissed and the USB cable is
-unplugged, the keyboard did not reconnect over Bluetooth within the 90s
-watch window, even though the bond stayed intact
-(`Paired/Bonded/Trusted: yes`, `Connected: no`). Current best hypothesis: the
-raw-mgmt path this crate no longer has explicitly ran a GATT
-connect→subscribe-CCCDs→hold-until-drop sequence (`adopt`, née "phase 4")
-before ever telling the user to unplug, which is apparently what makes the
-keyboard actually commit to and start advertising on its new address; the
-D-Bus path relies on bluetoothd's own HOGP profile doing the equivalent
-implicitly, which this test suggests may not be reliable without that
-explicit hold. Worth trying: chain `adopt` after `dbus-pair` inside `auto`,
-the same way the (now-removed) raw-mgmt engine used to. Not yet done.
+keyboard input device — bluetoothd never stopped. `mkbd-pair auto` then ran
+the complete flow — prompt, pair, info dialog, unplug, reconnect — with the
+reconnect showing up **within 0s** of unplugging.
+
+**Not perfectly reliable yet — two transient failures seen, both recovered
+by a plain retry, no code fix needed:**
+- One `Adapter1.ConnectDevice()` call timed out after 20s (no error, just
+  silence) on an otherwise-identical attempt; retrying immediately after
+  succeeded in the usual <1s.
+- One reconnect-after-unplug attempt did not see the keyboard reconnect
+  within the 90s watch window, despite the bond staying intact
+  (`Paired/Bonded/Trusted: yes`, `Connected: no`); a subsequent full run
+  reconnected in 0s.
+
+Both look like ordinary BLE connection flakiness (consistent with
+`test/optionA-dbus-pair.py`'s own header: "don't burn retries... casually")
+rather than a logic bug in this port — no fix was needed, just a retry. If
+this shows up again with a pattern (e.g. reconnect *always* fails on the
+first unplug after a fresh pair), the earlier hypothesis is worth
+revisiting: chain `adopt`'s GATT-hold sequence into `dbus-pair`/`auto` before
+telling the user to unplug, the way the (now-removed) raw-mgmt engine always
+did.
 
 ## What this replaces
 
@@ -146,13 +155,13 @@ raw-mgmt engine it patched was removed (see above).
 
 ## Known-unverified / lower-confidence spots
 
-- **Reconnect-after-unplug in `auto`**: hardware-tested and **did not work**
-  within the 90s watch window on the one run tried — see the status note at
-  the top of this file. This is the main open item.
-- **`adopt` (`src/att.rs`)**: not yet run standalone against hardware. If the
-  reconnect-after-unplug hypothesis above is right, chaining `adopt` after
-  `dbus-pair` (inside `auto`, before telling the user to unplug) is the
-  likely fix — but `adopt` itself needs verifying first.
+- **Reconnect-after-unplug in `auto`**: hardware-tested, succeeded (0s) on
+  most runs, failed to reconnect within 90s on one — see the status note at
+  the top of this file. Not enough runs yet to know if that's rare flakiness
+  (most likely) or a real intermittent gap.
+- **`adopt` (`src/att.rs`)**: not yet run standalone against hardware — the
+  reconnect-watch working without it on most runs makes it look unnecessary
+  for this keyboard's D-Bus path, but that's not the same as verified.
 - **`sock.rs`**: hand-written `sockaddr_l2cap` struct and raw
   `libc::socket`/`bind`/`connect`/`setsockopt` calls for the L2CAP ATT
   channel `adopt` uses, since Rust's `std::net` has no `AF_BLUETOOTH`
