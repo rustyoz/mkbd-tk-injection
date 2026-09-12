@@ -4,27 +4,48 @@ test/optionA-pair.py, but through bluetoothd's own Adapter1.AddRemoteLegacyOOB()
 D-Bus method with bluetoothd left running throughout, instead of the raw mgmt
 socket with bluetoothd stopped.
 
-RESULT (2026-09-11, real hardware): failed 5/5. BlueZ's StartDiscovery()
-never saw the keyboard's directed advertisement within 20s, any number of
-retries. This confirms docs/PROTOCOL.md's (sibling modernkeyboard repo)
-original caution that BlueZ's normal Device1.Pair() cannot catch this
-keyboard's short directed LE advertising window — that's why every other
-script here (tk-pair.py, optionA-pair.py) uses MGMT_OP_PAIR_DEVICE directly
-instead, and optionA/autopair/mkbd-optionA-autopair was reverted back to that
-after trying this. Do not wire this back into the auto-pair flow without
-first fixing the discovery miss (e.g. an HCI-level directed-connect instead
-of generic discovery) — repeated failed attempts here also cost the
-keyboard's previously-working bond (see optionA/autopair/README.md "The
-D-Bus pairing experiment"). Kept as a runnable record of the experiment, not
-as a recommended path.
+FIRST ATTEMPT (2026-09-11, real hardware): failed 5/5 using
+Adapter1.StartDiscovery() + polling for the Device1 object to appear.
+BlueZ's discovery/report pipeline never saw the keyboard's directed
+advertisement within 20s, any number of retries — StartDiscovery() only
+reports devices the passive/active scanner happens to catch, and this
+keyboard's directed advertising window is apparently too narrow/targeted for
+that. The raw MGMT_OP_PAIR_DEVICE path (test/optionA-pair.py) never depends
+on that report pipeline at all — it issues a direct LE Create Connection to
+the known address — which is why it kept working throughout.
+
+SECOND ATTEMPT (2026-09-12, real hardware): SUCCESS. Swapped
+StartDiscovery() for Adapter1.ConnectDevice(), a stock (if
+`[experimental]`-flagged) BlueZ method whose own doc string is literally
+"Connects to device without need of performing General Discovery" (man 5
+org.bluez.Adapter). ConnectDevice drives a direct connection by address the
+same way the raw-mgmt path does, and it worked first try: connected in 0.1s,
+Device1.Pair() completed, Paired/Bonded/Connected all true, and — checked
+separately after this script exited — full GATT resolution (HID, Battery at
+85%, Device Information, the vendor service) plus a live `bluez-hog-device`
+uhid keyboard input device, all with bluetoothd never stopped or masked for
+one second of it. This is the first time the whole pairing has gone through
+bluetoothd's own D-Bus surface end to end.
+
+One run is not five, and "5/5 failed" before was specifically a discovery
+problem this bypasses entirely rather than proof the underlying mechanism is
+flaky — but there's no longer a known reason this shouldn't be the normal
+path. Repeated attempts against the same peer within one boot have separately
+been observed to degrade (see optionA/BUILD.md "Known issue"; a likely fix
+for that has been applied to mgmt_pair_device(), which this script doesn't
+even use, so it's an open question whether the same degradation can affect
+this path too) and this keyboard abandons its currently active bond as soon
+as a new F1/F2/F3 exchange starts regardless of outcome — so still don't
+burn retries against the same peer casually.
 
 Needs test/install-optionA-bluetoothd.sh already run (AddRemoteLegacyOOB has
-to exist on the live bus) and root (hidraw + system D-Bus).
+to exist on the live bus), bluetoothd running with --experimental (needed for
+ConnectDevice), and root (hidraw + system D-Bus).
 
 Sequence:
   1. F1/F2/F3 over USB              -> new bond address + one-time TK
   2. Adapter1.AddRemoteLegacyOOB()  -> arm the TK, bluetoothd stays up
-  3. StartDiscovery(), poll for the Device1 object to appear
+  3. Adapter1.ConnectDevice()       -> connect directly by address, no discovery
   4. Device1.Pair() with a NoInputNoOutput agent registered
   5. report Paired/Bonded/Trusted/Connected + GATT resolution
 """
@@ -106,24 +127,15 @@ def find_adapter(bus, want_addr):
     sys.exit(f"no org.bluez.Adapter1 with address {want_addr} on the bus")
 
 
-def find_device_path(bus, addr):
-    om = dbus.Interface(bus.get_object(BLUEZ, "/"), OM_IFACE)
-    for path, ifaces in om.GetManagedObjects().items():
-        props = ifaces.get(DEVICE_IFACE)
-        if props and str(props.get("Address", "")).upper() == addr.upper():
-            return path
-    return None
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hci", default="hci0")
     ap.add_argument("--adapter", help="local adapter bdaddr (default: hci0's)")
     ap.add_argument("--tk-order", choices=("as-is", "reversed"), default="as-is")
-    ap.add_argument("--discover-timeout", type=float, default=20.0,
-                    help="seconds to wait for the Device1 object to appear "
-                         "after StartDiscovery (default 20)")
+    ap.add_argument("--connect-timeout", type=float, default=20.0,
+                    help="seconds to wait for Adapter1.ConnectDevice() to "
+                         "return (default 20)")
     ap.add_argument("--pair-timeout", type=float, default=30.0)
     args = ap.parse_args()
 
@@ -191,44 +203,34 @@ def main():
                  f"test/install-optionA-bluetoothd.sh")
     print("   stored — kernel now has the TK for this identity")
 
-    # --- start discovery, wait for the Device1 object (the open question) ---
-    print(f":: StartDiscovery(), waiting up to {args.discover_timeout:g}s "
-          f"for {addr} to appear ...")
-    try:
-        adapter.StartDiscovery()
-    except dbus.exceptions.DBusException as e:
-        if "InProgress" not in str(e):
-            raise
-
-    device_path = None
+    # --- connect directly by address, no discovery/report pipeline involved ---
+    print(f":: Adapter1.ConnectDevice({addr}, random), timeout "
+          f"{args.connect_timeout:g}s ...")
     t0 = time.monotonic()
-    while time.monotonic() - t0 < args.discover_timeout:
-        device_path = find_device_path(bus, addr)
-        if device_path:
-            break
-        time.sleep(0.3)
-    dt = time.monotonic() - t0
-
     try:
-        adapter.StopDiscovery()
-    except dbus.exceptions.DBusException:
-        pass
-
-    if not device_path:
+        device_path = adapter.ConnectDevice(
+            {"Address": addr, "AddressType": "random"},
+            timeout=args.connect_timeout)
+    except dbus.exceptions.DBusException as e:
+        dt = time.monotonic() - t0
         print()
-        print(f"RESULT: the keyboard's directed advertisement was NOT seen by "
-              f"BlueZ discovery within {args.discover_timeout:g}s.")
-        print("  This confirms docs/PROTOCOL.md's caution: normal BlueZ "
-              "discovery does not reliably catch this keyboard's directed "
-              "advertising window. The raw MGMT_OP_PAIR_DEVICE path "
-              "(test/optionA-pair.py) remains the one that works.")
+        print(f"RESULT: ConnectDevice failed after {dt:.1f}s: {e}")
+        if "NotSupported" in str(e):
+            print("  NotSupported usually means bluetoothd is not running "
+                  "with --experimental (ConnectDevice is an experimental "
+                  "BlueZ method) — check `ps aux | grep bluetoothd`.")
+        else:
+            print("  If this still can't reach the keyboard, the raw "
+                  "MGMT_OP_PAIR_DEVICE path (test/optionA-pair.py) remains "
+                  "the one known to work.")
         try:
             agent_mgr.UnregisterAgent(AGENT_PATH)
         except dbus.exceptions.DBusException:
             pass
         sys.exit(1)
+    dt = time.monotonic() - t0
 
-    print(f"   found Device1 at {device_path} after {dt:.1f}s")
+    print(f"   connected, Device1 at {device_path} after {dt:.1f}s")
     device = dbus.Interface(bus.get_object(BLUEZ, device_path), DEVICE_IFACE)
     device_props = dbus.Interface(bus.get_object(BLUEZ, device_path), PROPS_IFACE)
 
