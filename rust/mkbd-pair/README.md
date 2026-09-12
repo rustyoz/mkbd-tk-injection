@@ -22,7 +22,8 @@ until it's been exercised on real hardware and someone says to cut over.
 | `test/optionA-pair.py` | `src/pair.rs` (`Engine::OptionA`) | the real `MGMT_OP_ADD_REMOTE_OOB_DATA` len-88 path |
 | `test/phase4.py` | `src/att.rs` (`run_adopt`) | bonded GATT provisioning / address adoption over raw L2CAP ATT |
 | `pairmodernkeyboard.sh` | `mkbd-pair pair` | CLI wrapper folded into the engine itself |
-| `optionA/autopair/mkbd-optionA-autopair` | `mkbd-pair auto` (`src/autopair.rs`) | udev-triggered detect/prompt/pair/confirm/reconnect-watch |
+| `test/optionA-dbus-pair.py` | `src/dbus_pair.rs` (`mkbd-pair dbus-pair`) | Option A over bluetoothd's D-Bus surface, bluetoothd never stopped |
+| `optionA/autopair/mkbd-optionA-autopair` | `mkbd-pair auto` (`src/autopair.rs`) | udev-triggered detect/prompt/pair/confirm/reconnect-watch; tries D-Bus first, falls back to raw-mgmt |
 
 `lib/mkbd_common.py`'s BR/EDR helpers (`write_device_info`,
 `mgmt_load_link_keys`/`mgmt_load_ltks`/`mgmt_load_irks`) and the report
@@ -40,6 +41,9 @@ mkbd-pair adopt <KBD_ADDR> [--adapter ADDR] [--hci hci0] [--rounds N]
                 [--hold SECS] [--discover] [--writes] [--read-msacc]
                 [--f3-check] [--cccd 0x17,0x1d,...] [--led H] [--feature H]
                 [--notify H] [--led-writes N] [--msacc H,H]
+
+mkbd-pair dbus-pair [--hci hci0] [--adapter ADDR] [--tk-order as-is|reversed]
+                    [--connect-timeout SECS] [--pair-timeout SECS]
 
 mkbd-pair auto [--hci hci0] [--reconnect-timeout SECS]
 ```
@@ -66,6 +70,49 @@ scheme worth carrying into a CLI a new user has to read cold. This port keeps
 
 Comments that cite the Python filenames (`test/phase4.py`, etc.) for
 traceability were left alone — those are real paths, not phase numbers.
+
+## `dbus-pair` and the `auto` fallback (ported from `worktree-kernel-leak-fix`)
+
+Another session's branch (`worktree-kernel-leak-fix`, PR #2, commits
+`331e28e`/`af3523e`/`e3e7357`) hardware-verified two fixes on top of what this
+crate started from; both are ported here directly from those commits (not
+re-derived from a description):
+
+1. **The D-Bus pairing path works with `Adapter1.ConnectDevice()`.** The
+   original attempt used `Adapter1.StartDiscovery()` + polling for a
+   `Device1` object and failed 5/5 on hardware — BlueZ's discovery pipeline
+   never saw the keyboard's directed advertisement. `ConnectDevice()` (a
+   stock, `[experimental]`-flagged BlueZ method: "Connects to device without
+   need of performing General Discovery") connects directly by address
+   instead, the same mechanism the raw-mgmt path already uses, and was
+   verified end to end: `AddRemoteLegacyOOB` → `ConnectDevice` (0.1s) →
+   `Device1.Pair()` → `Paired=true Bonded=true Connected=true`, full GATT
+   resolution, live `uhid` input device, bluetoothd never stopped. Ported as
+   `src/dbus_pair.rs` / `mkbd-pair dbus-pair`, using `zbus`'s blocking API
+   (async-io reactor, no tokio, no libdbus) — the `ConnectDevice`/`Pair()`
+   calls run on a helper thread with a channel-based timeout, mirroring the
+   client-side `timeout=` kwargs the Python version passes to dbus-python.
+   `mkbd-pair auto` now tries this path first and falls back to
+   `pair::Engine::OptionA` (raw mgmt, bluetoothd stopped) on failure — the
+   fallback exists because this keyboard abandons its currently active bond
+   as soon as a new F1/F2/F3 exchange starts regardless of outcome, so a
+   failed D-Bus attempt has already cost the bond either way, and falling
+   straight back to the proven path re-establishes it in the same run.
+2. **`mgmt_pair_device` now sends `MGMT_OP_CANCEL_PAIR_DEVICE` +
+   `MGMT_OP_DISCONNECT`** for the peer whenever it's about to return without
+   a confirmed bond (no LTK). Root cause: both the in-flight bonding request
+   and the underlying LE connection are kernel state tracked per-adapter, not
+   per-socket, so closing the raw HCI socket on a failed/timed-out attempt
+   left them running for the next attempt to collide with — the suspected
+   cause of the "repeated attempts degrade, only a reboot fixes it" symptom
+   ("ACL packet for unknown connection handle" in dmesg). This one **has not
+   been hardware-stress-tested on either branch** as of this port — it's a
+   strong hypothesis with a concrete, low-risk fix (send two more mgmt
+   commands on an already-failing path), not a confirmed fix.
+
+The D-Bus path is new surface with its own unverified-in-this-port status
+(see below) on top of being unverified-by-this-session in general — treat it
+as two layers of "needs a real hardware run before trusting it."
 
 ## Differences from the Python tools (deliberate)
 
@@ -112,6 +159,16 @@ likely to need a fix on first real run:
 - **`btmon`/`dmesg` capture for `--diag`**: reimplemented but not exercised;
   a wrong parse of `btmon -r`/`dmesg` output only degrades diagnostics, not
   the pairing result.
+- **`src/dbus_pair.rs`'s zbus usage**: the D-Bus method signatures
+  (`Adapter1.AddRemoteLegacyOOB(s,s,ay)`, `Adapter1.ConnectDevice(a{sv})->o`,
+  `AgentManager1`/`Agent1`) were cross-checked against the actual BlueZ patch
+  (`optionA/bluez/0001-*.patch`) and the verified Python script, and it
+  compiles/links against zbus 5.19's blocking API — but this exact Rust
+  translation (proxy macros, the exported `Agent1` object, the
+  thread+channel timeout wrapper around `ConnectDevice`/`Pair()`) has not
+  been run against a live system bus or bluetoothd at all. If pairing hangs
+  rather than failing cleanly, or the agent never gets a callback it should,
+  start here.
 
 ## Building
 

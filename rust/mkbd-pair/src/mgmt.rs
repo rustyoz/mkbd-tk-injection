@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 // engine (only by other tools out of this port's scope), so weren't carried
 // over here.
 pub const MGMT_OP_SET_POWERED: u16 = 0x0005;
+pub const MGMT_OP_DISCONNECT: u16 = 0x0014;
 pub const MGMT_OP_PAIR_DEVICE: u16 = 0x0019;
+pub const MGMT_OP_CANCEL_PAIR_DEVICE: u16 = 0x001A;
 pub const MGMT_OP_UNPAIR_DEVICE: u16 = 0x001B;
 pub const MGMT_OP_USER_CONFIRMATION_REPLY: u16 = 0x001C;
 pub const MGMT_OP_USER_PASSKEY_NEG_REPLY: u16 = 0x001F;
@@ -348,5 +350,47 @@ pub fn mgmt_pair_device(
         res.status = Some(0xFF);
         res.status_name = "timeout".to_string();
     }
+
+    // Anything short of a real bond (an LTK actually landed) means the
+    // kernel's own MGMT_OP_PAIR_DEVICE bonding request and/or the underlying
+    // LE connection may still be alive and unattended — closing this raw HCI
+    // socket does NOT cancel either; they are kernel state, not socket
+    // state. Left alone, a subsequent attempt against the same peer starts
+    // while that state is still there, which produces same-boot pairing
+    // degradation (leaked connection/SMP state, "ACL packet for unknown
+    // connection handle" in dmesg) that previously needed a reboot to clear.
+    // Explicitly cancel the pairing request and force a disconnect before
+    // giving up, mirroring what a clean boot's absence of prior state
+    // achieves. Ported from lib/mkbd_common.py's mgmt_pair_device() on
+    // worktree-kernel-leak-fix (commit 331e28e) — not yet hardware-tested on
+    // either branch as of this port; treat as a strong hypothesis with a
+    // concrete fix, not confirmed-fixed.
+    if res.ltk.is_none() {
+        let mut addr_info = peer.to_vec();
+        addr_info.push(addr_type);
+        for op in [MGMT_OP_CANCEL_PAIR_DEVICE, MGMT_OP_DISCONNECT] {
+            let mut req = Vec::with_capacity(6 + addr_info.len());
+            req.extend_from_slice(&op.to_le_bytes());
+            req.extend_from_slice(&hci_index.to_le_bytes());
+            req.extend_from_slice(&(addr_info.len() as u16).to_le_bytes());
+            req.extend_from_slice(&addr_info);
+            if s.send(&req).is_err() {
+                break;
+            }
+        }
+        if trace {
+            info("  mgmt: pairing not confirmed bonded -> cancel + disconnect (avoid leaking kernel conn state)");
+        }
+        let drain_end = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < drain_end {
+            let mut buf = [0u8; 2048];
+            match s.recv(&mut buf) {
+                Ok(0) => break, // timeout tick
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+    }
+
     Ok(res)
 }

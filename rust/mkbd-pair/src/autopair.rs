@@ -10,6 +10,7 @@
 //! Needs: root (mgmt socket + hidraw), the Option A patched bluetooth.ko
 //! booted, zenity + notify-send in the logged-in graphical session.
 
+use crate::dbus_pair;
 use crate::pair::{self, Engine, PairOpts};
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
@@ -179,24 +180,54 @@ pub fn run_auto(opts: &AutoOpts) -> Result<(), String> {
     }
 
     session.notify("Pairing…", None);
-    let pair_opts = PairOpts {
-        engine: Engine::OptionA,
+
+    // Try the D-Bus path first (bluetoothd stays up throughout); fall back to
+    // the proven raw-mgmt Option A path (bluetoothd stopped for the duration)
+    // if it fails — mirroring optionA/autopair/mkbd-optionA-autopair on
+    // worktree-kernel-leak-fix (commit af3523e). The fallback exists because
+    // of what happens either way on failure: this keyboard abandons its
+    // currently active bond as soon as a new F1/F2/F3 exchange starts,
+    // whether or not that attempt then succeeds — so if the D-Bus attempt
+    // fails, the bond is already gone regardless, and falling straight back
+    // to the path known to work re-establishes it in the same run instead of
+    // leaving the user stranded.
+    let dbus_opts = dbus_pair::DbusPairOpts {
         hci: opts.hci.clone(),
         ..Default::default()
     };
-    let outcome = match pair::run_pair(&pair_opts) {
-        Ok(o) => o,
+    let addr = match dbus_pair::run_dbus_pair(&dbus_opts) {
+        Ok(o) => {
+            log(format!("paired via D-Bus, bluetoothd never stopped: {}", o.addr));
+            o.addr
+        }
         Err(e) => {
-            log(format!("pairing failed: {e}"));
-            session.error_box(&format!("Pairing failed.\n\n{e}"));
-            return Err(e);
+            log(format!(
+                "D-Bus pairing path failed ({e}), falling back to raw-mgmt \
+                 (bluetoothd will be stopped for the duration)"
+            ));
+            let pair_opts = PairOpts {
+                engine: Engine::OptionA,
+                hci: opts.hci.clone(),
+                ..Default::default()
+            };
+            match pair::run_pair(&pair_opts) {
+                Ok(o) => {
+                    log(format!("paired via raw-mgmt fallback: {}", o.addr));
+                    o.addr
+                }
+                Err(e2) => {
+                    log("both pairing paths failed");
+                    session.error_box(&format!(
+                        "Pairing failed (D-Bus and raw-mgmt both).\n\nD-Bus:\n{e}\n\nraw-mgmt:\n{e2}"
+                    ));
+                    return Err(format!("D-Bus: {e}; raw-mgmt: {e2}"));
+                }
+            }
         }
     };
-    log(format!("paired: {}", outcome.addr));
 
     session.info_box(&format!(
-        "Keyboard paired ({}).\n\nUnplug the USB cable now — it will reconnect automatically over Bluetooth.",
-        outcome.addr
+        "Keyboard paired ({addr}).\n\nUnplug the USB cable now — it will reconnect automatically over Bluetooth."
     ));
 
     let mut t = 0u64;
@@ -215,7 +246,7 @@ pub fn run_auto(opts: &AutoOpts) -> Result<(), String> {
 
     let mut t = 0u64;
     while t < opts.reconnect_timeout {
-        let out = Command::new("bluetoothctl").args(["info", &outcome.addr]).output();
+        let out = Command::new("bluetoothctl").args(["info", &addr]).output();
         if let Ok(out) = out {
             let text = String::from_utf8_lossy(&out.stdout);
             if text.lines().any(|l| l.trim() == "Connected: yes") {
@@ -231,7 +262,7 @@ pub fn run_auto(opts: &AutoOpts) -> Result<(), String> {
     session.notify(
         &format!(
             "Did not reconnect within {}s — try: bluetoothctl connect {}",
-            opts.reconnect_timeout, outcome.addr
+            opts.reconnect_timeout, addr
         ),
         Some("critical"),
     );

@@ -8,6 +8,7 @@ mod att;
 mod autopair;
 mod bdaddr;
 mod bond;
+mod dbus_pair;
 mod hid;
 mod log;
 mod mgmt;
@@ -44,8 +45,12 @@ enum Cmd {
     /// Standalone bonded GATT provisioning: subscribe CCCDs and hold the link until the
     /// keyboard adopts its new address. Replaces `test/phase4.py`.
     Adopt(AdoptArgs),
-    /// udev-triggered detect -> prompt -> pair -> confirm -> reconnect-watch flow.
-    /// Replaces optionA/autopair/mkbd-optionA-autopair.
+    /// Option A pairing through bluetoothd's own D-Bus surface (AddRemoteLegacyOOB +
+    /// ConnectDevice), bluetoothd never stopped. Replaces `test/optionA-dbus-pair.py`.
+    DbusPair(DbusPairArgs),
+    /// udev-triggered detect -> prompt -> pair -> confirm -> reconnect-watch flow. Tries
+    /// the D-Bus path first, falls back to raw-mgmt Option A. Replaces
+    /// optionA/autopair/mkbd-optionA-autopair.
     Auto(AutoArgs),
 }
 
@@ -112,6 +117,20 @@ struct AdoptArgs {
 }
 
 #[derive(clap::Args)]
+struct DbusPairArgs {
+    #[arg(long, default_value = "hci0")]
+    hci: String,
+    #[arg(long)]
+    adapter: Option<String>,
+    #[arg(long = "tk-order", value_parser = ["as-is", "reversed"], default_value = "as-is")]
+    tk_order: String,
+    #[arg(long = "connect-timeout", default_value_t = 20.0)]
+    connect_timeout: f64,
+    #[arg(long = "pair-timeout", default_value_t = 30.0)]
+    pair_timeout: f64,
+}
+
+#[derive(clap::Args)]
 struct AutoArgs {
     #[arg(long, default_value = "hci0")]
     hci: String,
@@ -133,6 +152,7 @@ fn main() {
     let code = match cli.cmd {
         Cmd::Pair(a) => run_pair_cmd(a),
         Cmd::Adopt(a) => run_adopt_cmd(a),
+        Cmd::DbusPair(a) => run_dbus_pair_cmd(a),
         Cmd::Auto(a) => run_auto_cmd(a),
     };
     std::process::exit(code);
@@ -223,6 +243,31 @@ fn run_adopt_cmd(a: AdoptArgs) -> i32 {
     }
     att::run_adopt(&opts);
     0
+}
+
+fn run_dbus_pair_cmd(a: DbusPairArgs) -> i32 {
+    let opts = dbus_pair::DbusPairOpts {
+        hci: a.hci,
+        adapter: a.adapter,
+        tk_reversed: a.tk_order == "reversed",
+        connect_timeout: std::time::Duration::from_secs_f64(a.connect_timeout),
+        pair_timeout: std::time::Duration::from_secs_f64(a.pair_timeout),
+    };
+    match dbus_pair::run_dbus_pair(&opts) {
+        Ok(o) => {
+            println!();
+            println!("Modern Keyboard  ·  {}", o.addr);
+            println!(
+                "paired via D-Bus (Paired={} Bonded={} Connected={}), bluetoothd never stopped",
+                o.paired, o.bonded, o.connected
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
 }
 
 fn run_auto_cmd(a: AutoArgs) -> i32 {
