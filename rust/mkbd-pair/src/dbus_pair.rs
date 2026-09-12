@@ -197,6 +197,16 @@ pub fn run_dbus_pair(opts: &DbusPairOpts) -> Result<DbusPairOutcome, String> {
         return Err("run as root".to_string());
     }
 
+    let removed = crate::bond::remove_matching_bluez_devices();
+    if !removed.is_empty() {
+        println!(
+            ":: removed {} stale keyboard device entr{} from BlueZ: {}",
+            removed.len(),
+            if removed.len() == 1 { "y" } else { "ies" },
+            removed.join(", ")
+        );
+    }
+
     let conn = Connection::system().map_err(|e| format!("connecting to system bus: {e}"))?;
 
     let adapter_addr = match &opts.adapter {

@@ -89,6 +89,12 @@ pub fn run_pair(opts: &PairOpts) -> Result<PairOutcome, String> {
         return Err("run as root".to_string());
     }
 
+    let removed = bond::remove_matching_bluez_devices();
+    if !removed.is_empty() {
+        println!(":: removed {} stale keyboard device entr{} from BlueZ: {}",
+            removed.len(), if removed.len() == 1 { "y" } else { "ies" }, removed.join(", "));
+    }
+
     let hci_index = hci_index_of(&opts.hci);
 
     if opts.engine == Engine::DebugfsTk {
