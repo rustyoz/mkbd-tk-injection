@@ -60,10 +60,33 @@ failed D-Bus attempts in a row cost the previously-working bond from an
 earlier successful `--option-a` pair, which had to be re-established with
 the raw-mgmt path afterward. `test/optionA-dbus-pair.py` and the patched
 `bluetoothd` (`../bluez/`) are kept as-is for reference, but **don't retry
-this path** without first fixing the discovery-miss (e.g. driving the LE
-scan/connection at the HCI level directly instead of through
-`Adapter1.StartDiscovery()`), and be aware that testing it at all risks the
-current bond.
+this path** without first fixing the discovery-miss, and be aware that
+testing it at all risks the current bond.
+
+**Discovery-miss fix candidate found, not yet tried (2026-09-12):** the
+script's failure is specifically that `Device1.Pair()` requires a `Device1`
+object, and BlueZ only creates one from a discovery "device found" report —
+which never fires for this keyboard's directed advertisement. That's a
+different mechanism from the actual LE connection attempt (`LE Create
+Connection`, which is what the working raw-mgmt path uses and what
+`Device1.Connect()`/`Pair()` also trigger internally once a device object
+exists) — the raw-mgmt path never depends on discovery at all, it connects
+straight to the known address.
+
+BlueZ (confirmed on this exact box: bluez 5.87-2, bluetoothd already running
+with `--experimental` via a systemd drop-in, `busctl --system introspect
+org.bluez /org/bluez/hci0` shows it on the live bus) already exposes exactly
+this as `Adapter1.ConnectDevice(dict)` — `man 5 org.bluez.Adapter`: *"Connects
+to device without need of performing General Discovery... similar to Connect
+method on Device1... returns object path to created device object."* This is
+a stock, already-callable BlueZ method, not something that needs patching in.
+The untried fix: in `test/optionA-dbus-pair.py`, replace the
+`StartDiscovery()` + poll-for-`Device1` block with one call to
+`Adapter1.ConnectDevice({"Address": addr, "AddressType": "random"})`, then
+proceed to `Device1.Pair()` (or check whether the OOB-armed peer completes
+SMP automatically once connected, since the peripheral itself is what
+initiates the security request). Not yet tested on hardware — do that before
+relying on it, same bond-risk caveat as above applies to each attempt.
 
 ## What's not handled here
 

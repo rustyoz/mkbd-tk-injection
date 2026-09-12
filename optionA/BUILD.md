@@ -129,10 +129,33 @@ patch 2 or 3 not tearing down cleanly on an aborted OOB-legacy pairing.
 
 **Workaround that reliably resolves it: reboot.** A clean boot cleared
 whatever state had accumulated, and the very next attempt paired correctly.
-**Not yet root-caused or fixed in the kernel patches** — if this recurs,
-suspect the same mechanism before assuming a new bug, and don't burn many
-retries against the same peer address in one boot while investigating (each
-attempt also risks the keyboard's own bond state — see
+
+**Root cause identified (2026-09-12) — it's not the kernel patches.**
+`mkbd_common.mgmt_pair_device()` sends `MGMT_OP_PAIR_DEVICE` and then, on any
+non-bonded exit (timeout, `MGMT_EV_AUTH_FAILED`, or a Command Complete that
+never produced an LTK), simply closed its raw HCI socket and returned.
+Closing that socket cancels nothing: `MGMT_OP_PAIR_DEVICE` and the LE
+connection it drives are kernel state tracked per-adapter, not per-socket, so
+an abandoned attempt (every failed D-Bus retry counted too, since those also
+armed the OOB TK against the real peer identity) left the bonding request
+and/or the underlying connection running in the kernel with nothing left to
+ever tear it down. The next attempt then started while that state was still
+live — exactly the leaked/uncleaned connection `dmesg` was showing
+(`ACL packet for unknown connection handle`), and exactly why only a reboot
+(which force-clears all kernel BT state) ever cleared it.
+
+**Fixed** in `lib/mkbd_common.py`: `mgmt_pair_device()` now sends
+`MGMT_OP_CANCEL_PAIR_DEVICE` followed by `MGMT_OP_DISCONNECT` for the peer
+before returning, whenever it's about to report anything short of a
+confirmed bond (no LTK). This is a userspace-only fix — no kernel patch
+changed — and still needs a hardware re-run of the same repeated-attempt
+scenario to confirm it actually prevents the degradation; it hasn't been
+tested on hardware yet. If it recurs after this fix, the leak is elsewhere
+(e.g. genuinely in patch 2/3's aborted-pairing cleanup) and that's the next
+place to look — but test this fix first before assuming that.
+
+Don't burn many retries against the same peer address in one boot while
+investigating (each attempt also risks the keyboard's own bond state — see
 `autopair/README.md` "The D-Bus pairing experiment").
 
 ### Userspace bug found and fixed

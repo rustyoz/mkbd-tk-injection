@@ -398,9 +398,11 @@ HCI_CHANNEL_CONTROL = 3
 HCI_DEV_NONE = 0xFFFF
 
 MGMT_OP_SET_POWERED = 0x0005
+MGMT_OP_DISCONNECT = 0x0014
 MGMT_OP_LOAD_LINK_KEYS = 0x0012        # BR/EDR (legacy; kept for reference)
 MGMT_OP_LOAD_LONG_TERM_KEYS = 0x0013   # LE
 MGMT_OP_PAIR_DEVICE = 0x0019
+MGMT_OP_CANCEL_PAIR_DEVICE = 0x001A
 MGMT_OP_UNPAIR_DEVICE = 0x001B
 MGMT_OP_USER_CONFIRMATION_REPLY = 0x001C
 MGMT_OP_USER_CONFIRMATION_NEG_REPLY = 0x001D
@@ -665,6 +667,38 @@ def mgmt_pair_device(addr: str, addr_type: int = MGMT_ADDR_LE_RANDOM,
         if res["status"] is None:
             res["status"] = 0xFF
             res["status_name"] = "timeout"
+
+        # Anything short of a real bond (an LTK actually landed) means the
+        # kernel's own MGMT_OP_PAIR_DEVICE bonding request and/or the
+        # underlying LE connection may still be alive and unattended --
+        # closing this raw HCI socket does NOT cancel either; they are kernel
+        # state, not socket state. Left alone, a subsequent attempt against
+        # the same peer starts while that state is still there, which is
+        # what produced the same-boot degradation (leaked connection/SMP
+        # state, "ACL packet for unknown connection handle" in dmesg) that a
+        # reboot was previously the only known fix for. Explicitly cancel the
+        # pairing request and force a disconnect before giving up, mirroring
+        # what a clean boot's absence of prior state achieves.
+        if not res["ltk"]:
+            addr_info = peer + bytes([addr_type])
+            for op in (MGMT_OP_CANCEL_PAIR_DEVICE, MGMT_OP_DISCONNECT):
+                try:
+                    s.send(struct.pack("<HHH", op, hci_index, len(addr_info))
+                           + addr_info)
+                except OSError:
+                    break
+            if trace:
+                info("  mgmt: pairing not confirmed bonded -> "
+                     "cancel + disconnect (avoid leaking kernel conn state)")
+            drain_end = time.monotonic() + 1.0
+            while time.monotonic() < drain_end:
+                try:
+                    s.recv(2048)
+                except socket.timeout:
+                    break
+                except OSError:
+                    break
+
         return res
     finally:
         s.close()
