@@ -11,10 +11,15 @@ USB plug-in
   -> mkbd-optionA-autopair:
        1. revalidate the device is really there
        2. zenity --question in the logged-in graphical session: "Pair now?"
-       3. on yes: ../../pairmodernkeyboard.sh --option-a
+       3. on yes: try ../../test/optionA-dbus-pair.py first
+                  (F1/F2/F3 -> Adapter1.AddRemoteLegacyOOB -> Adapter1.ConnectDevice
+                  -> Device1.Pair -> bond written; bluetoothd never stopped,
+                  it does GATT/HID profile connection itself) — NOT YET
+                  hardware-verified, see that script's header.
+                  On failure, fall back to ../../pairmodernkeyboard.sh --option-a
                   (F1/F2/F3 -> MGMT Add Remote OOB Data len-88 -> MGMT Pair
                   Device -> phase 4 GATT provisioning -> bond written;
-                  bluetoothd stopped/masked for the duration)
+                  bluetoothd stopped/masked for the duration) — the proven path.
        4. zenity --info: "Paired. Unplug the USB cable now."
        5. poll: USB gone, then `bluetoothctl info <addr>` shows Connected: yes
        6. notify-send: "Connected over Bluetooth." (or a timeout warning)

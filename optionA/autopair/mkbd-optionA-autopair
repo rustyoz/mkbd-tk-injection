@@ -8,17 +8,24 @@
 #
 #   sudo optionA/autopair/mkbd-optionA-autopair
 #
-# Pairs via ../../pairmodernkeyboard.sh --option-a, which talks to the raw
-# mgmt socket directly and stops/masks bluetoothd for the duration of the
-# pair. An earlier version of this script tried Adapter1.AddRemoteLegacyOOB()
-# over D-Bus + StartDiscovery() instead (test/optionA-dbus-pair.py, kept for
-# the record) so bluetoothd would never need stopping — that failed 5/5 on
-# real hardware (2026-09-11): BlueZ discovery never saw the keyboard's
-# directed advertisement within 20s, confirming docs/PROTOCOL.md's original
-# caution. Worse, each failed attempt costs the *previously working* bond —
-# this keyboard appears to abandon its currently active bond as soon as a new
-# F1/F2/F3 pairing exchange starts, whether or not that attempt succeeds — so
-# don't resurrect the D-Bus path without a real fix for the discovery miss.
+# Tries ../../test/optionA-dbus-pair.py first — Adapter1.AddRemoteLegacyOOB()
+# + Adapter1.ConnectDevice() over D-Bus, bluetoothd never stopped — and falls
+# back to ../../pairmodernkeyboard.sh --option-a (raw mgmt socket, bluetoothd
+# stopped/masked for the duration) if that fails.
+#
+# An earlier version of the D-Bus attempt used StartDiscovery() instead of
+# ConnectDevice() and failed 5/5 on real hardware (2026-09-11): BlueZ
+# discovery never saw the keyboard's directed advertisement within 20s.
+# ConnectDevice() (2026-09-12) connects directly by address, the same
+# mechanism the raw-mgmt path already relies on — NOT YET HARDWARE-VERIFIED,
+# see test/optionA-dbus-pair.py's header before trusting this. The fallback
+# to raw-mgmt exists because of what happened last time either way: **this
+# keyboard appears to abandon its currently active bond as soon as a new
+# F1/F2/F3 pairing exchange starts, whether or not that attempt then
+# succeeds** — so if the D-Bus attempt fails, the bond is already gone
+# regardless, and falling straight back to the path known to work
+# re-establishes it in the same run instead of leaving the user stranded
+# (which is what happened manually last time this was tried).
 #
 # Needs: root (mgmt socket + hidraw), the Option A patched bluetooth.ko
 # booted (test/install-optionA-module.sh + reboot), zenity + notify-send in
@@ -96,28 +103,31 @@ if ! ask "A Microsoft Modern Keyboard was plugged in.\n\nPair it over Bluetooth 
 fi
 
 # --------------------------------------------------------------------------- #
-# 3. Pair (Option A: MGMT_OP_ADD_REMOTE_OOB_DATA, extended payload).
-#
-# Reverted from the D-Bus AddRemoteLegacyOOB()/StartDiscovery() experiment
-# (test/optionA-dbus-pair.py) after 5/5 hardware failures (2026-09-11): BlueZ
-# discovery never saw the keyboard's directed advertisement within 20s, any
-# number of times. That confirms docs/PROTOCOL.md's original caution, and
-# also cost the previously-working bond — each failed attempt re-runs
-# F1/F2/F3, and this keyboard appears to abandon its *currently active* bond
-# as soon as a new pairing exchange starts, even if that attempt then fails.
-# So the raw mgmt path (bluetoothd stopped for the pair) stays the one that
-# works; test/optionA-dbus-pair.py is kept as a record of the experiment.
+# 3. Pair. Try the D-Bus path (bluetoothd stays up throughout) first; fall
+#    back to the raw-mgmt path (Option A: MGMT_OP_ADD_REMOTE_OOB_DATA,
+#    extended payload; bluetoothd stopped for the duration) if it fails. See
+#    the file header for why the fallback exists and test/optionA-dbus-pair.py
+#    for the D-Bus path's own status (not yet hardware-verified as of this
+#    writing).
 # --------------------------------------------------------------------------- #
 notify "Pairing…"
 LOG=$(mktemp /tmp/mkbd-optionA-autopair.XXXXXX.log)
-if "$REPO/pairmodernkeyboard.sh" --option-a >"$LOG" 2>&1; then
-    ADDR=$(sed -n 's/^Modern Keyboard  ·  //p' "$LOG" | head -1)
-    log "paired: $ADDR"
+if python3 "$REPO/test/optionA-dbus-pair.py" >"$LOG" 2>&1; then
+    ADDR=$(sed -n 's/.*(new bond)[[:space:]]*:[[:space:]]*//p' "$LOG" | tail -1)
+    log "paired via D-Bus, bluetoothd never stopped: $ADDR"
     rm -f "$LOG"
 else
-    log "pairing failed, see $LOG"
-    error_box "Pairing failed.\n\n$(tail -5 "$LOG")\n\nFull log: $LOG"
-    exit 1
+    log "D-Bus pairing path failed (see $LOG), falling back to raw-mgmt (bluetoothd will be stopped for the duration)"
+    LOG2=$(mktemp /tmp/mkbd-optionA-autopair.XXXXXX.log)
+    if "$REPO/pairmodernkeyboard.sh" --option-a >"$LOG2" 2>&1; then
+        ADDR=$(sed -n 's/^Modern Keyboard  ·  //p' "$LOG2" | head -1)
+        log "paired via raw-mgmt fallback: $ADDR"
+        rm -f "$LOG" "$LOG2"
+    else
+        log "both pairing paths failed"
+        error_box "Pairing failed (D-Bus and raw-mgmt both).\n\nD-Bus:\n$(tail -3 "$LOG")\n\nraw-mgmt:\n$(tail -3 "$LOG2")\n\nLogs: $LOG , $LOG2"
+        exit 1
+    fi
 fi
 
 if [[ -z ${ADDR:-} ]]; then
