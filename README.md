@@ -1,10 +1,17 @@
-# mkbd-tk-injection
+# Microsoft Keyboard Pairing on Linux
 
-Native Linux Bluetooth pairing for the Microsoft Modern Keyboard (Fingerprint
-ID, model 1780) — no Windows, no seizing the Bluetooth controller into a
-userspace host process. Includes the kernel + BlueZ patches this needs, and
-`mkbd-pair`, a Rust tool that drives the pairing and can auto-pair the
-keyboard the moment it's plugged in over USB.
+**TL;DR:** the Microsoft Modern Keyboard (Fingerprint ID) can't be paired
+through a normal Linux Bluetooth stack — it demands an OOB pairing key the
+kernel has no way to accept. This repo has the kernel + BlueZ patches that
+fix that, and `mkbd-pair`, a Rust tool that pairs the keyboard and can
+auto-pair it the moment it's plugged in over USB. See
+[Installation](#installation) to set it up, or
+[Supported devices](#supported-devices) to check whether your keyboard
+applies.
+
+No Windows, no seizing the Bluetooth controller into a userspace host
+process — just a normal Bluetooth pairing through a normal `bluetoothd`,
+same as any other Bluetooth keyboard.
 
 ## The problem
 
@@ -59,6 +66,25 @@ kernel PoC, superseded by the real Option A patches) and the original raw
 `mgmt`-socket Python tools (`test/`) are kept as reference/historical
 material — useful for understanding the protocol or porting it elsewhere —
 but `mkbd-pair` is the one to actually install.
+
+## Supported devices
+
+**Tested and working: Microsoft Modern Keyboard, Fingerprint ID, model 1780**
+(USB `045e:0815`, Bluetooth PnP ID `045e:0813`) — the "BTLE Keyboard
+Fingerprint ID" that ships as part of the Microsoft Modern Keyboard with
+Fingerprint ID bundle. This is the only device this has been built and
+hardware-verified against.
+
+Untested, may or may not work: any other Microsoft keyboard using the same
+LE-legacy-OOB-over-USB-vendor-channel pairing scheme. The `F1`/`F2`/`F3` USB
+vendor exchange in `rust/mkbd-pair`'s `hid.rs`, the TK format, and the
+`045e:0815` VID/PID match in the udev rule are all specific to this exact
+device — a different Microsoft keyboard would need its own USB vendor
+protocol reverse-engineered (or confirmed identical) before any of this
+applies. The kernel/BlueZ patches themselves are protocol-generic (they just
+teach the stack to accept an LE-legacy-OOB TK from *any* peer that provides
+one), so a differently-shaped device that also needs this could reuse them
+even if `mkbd-pair`'s USB side needs adapting.
 
 ## Installation
 
