@@ -33,8 +33,17 @@ mod log;
 use autopair::AutoOpts;
 use clap::{Parser, Subcommand};
 
+/// Set by build.rs from `git rev-parse --short=12 HEAD` (+"-dirty" if the
+/// tree had uncommitted changes at build time) -- lets `mkbd-pair --version`
+/// answer "is the installed binary actually built from this commit?".
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")");
+
 #[derive(Parser)]
-#[command(name = "mkbd-pair", about = "Pair the Microsoft Modern Keyboard (1780) natively on Linux")]
+#[command(
+    name = "mkbd-pair",
+    about = "Pair the Microsoft Modern Keyboard (1780) natively on Linux",
+    version = VERSION
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
