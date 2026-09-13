@@ -1,0 +1,13 @@
+[Unit]
+Description=Auto-detect and offer to pair the Modern Keyboard (mkbd-pair, D-Bus)
+After=bluetooth.service
+Wants=bluetooth.service
+# udev fires this per hidraw "add"; a bare (non-templated) oneshot means a
+# second trigger while one run is still going just re-queues the same unit.
+# mkbd-pair's own flock (/run/lock/mkbd-pair-autopair.lock) is the real
+# guard against two runs overlapping.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mkbd-pair auto
+TimeoutStartSec=300

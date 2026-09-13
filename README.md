@@ -1,105 +1,192 @@
 # mkbd-tk-injection
 
-Patches and progress for adding **LE legacy OOB Temporary Key injection** to the
-Linux Bluetooth stack, so the Microsoft Modern Keyboard (Fingerprint ID, model
-1780) can be paired through a normal `bluetoothd` instead of the
-`HCI_CHANNEL_USER` userspace-host workarounds in the
-[`modernkeyboard`](../modernkeyboard) repo (`mkbd-bumble-pair`,
-`mkbd-smp-pair`).
+Native Linux Bluetooth pairing for the Microsoft Modern Keyboard (Fingerprint
+ID, model 1780) — no Windows, no seizing the Bluetooth controller into a
+userspace host process. Includes the kernel + BlueZ patches this needs, and
+`mkbd-pair`, a Rust tool that drives the pairing and can auto-pair the
+keyboard the moment it's plugged in over USB.
 
 ## The problem
 
-LE legacy pairing derives the STK from a 128-bit Temporary Key. For the OOB
-method that TK is carried out of band — here over the keyboard's USB vendor
-channel (the `F3` response). The in-kernel Security Manager (`net/bluetooth/smp.c`)
-has **no way to accept it**: `tk_request()` only ever sets `smp->tk` to `0`
-(Just Works) or a 32-bit passkey, and `MGMT_OP_ADD_REMOTE_OOB_DATA` has no field
-for a legacy TK (only BR/EDR and LE *Secure Connections* OOB `hash`/`rand`).
+LE legacy pairing derives the session key from a 128-bit Temporary Key (TK).
+For the out-of-band (OOB) method, that TK is carried outside the Bluetooth
+link — here, over the keyboard's USB vendor channel (its `F3` response). The
+in-kernel Security Manager (`net/bluetooth/smp.c`) has **no way to accept
+it**: `tk_request()` only ever sets the TK to `0` (Just Works) or a 32-bit
+passkey, and `MGMT_OP_ADD_REMOTE_OOB_DATA` has no field for a legacy TK (only
+BR/EDR and LE *Secure Connections* OOB `hash`/`rand`).
 
-This keyboard forces the issue: IO capability `NoInputNoOutput`, sets the MITM
-bit, sets OOB-present in its Pairing Response, and **hangs up (`0x13`) on any
-non-OOB Pairing Request**. Just Works is refused; OOB with the real TK is
-mandatory. Result today: unpairable on Linux without seizing the controller.
+This keyboard forces the issue: IO capability `NoInputNoOutput`, sets the
+MITM bit, sets OOB-present in its Pairing Response, and **hangs up (`0x13`)
+on any non-OOB Pairing Request**. Just Works is refused; OOB with the real TK
+is mandatory. Without a kernel/BlueZ change, it's unpairable through a normal
+`bluetoothd` on Linux.
 
-## Plan
+## The fix — "Option A"
 
-Full phased plan in [`PLAN.md`](PLAN.md) (copied from
-`modernkeyboard/docs/TK-INJECTION-PLAN.md`):
+A small kernel patch set (`optionA/0001`-`0004`) teaches the kernel's mgmt
+UAPI and SMP implementation to accept and use a real LE-legacy-OOB TK,
+delivered through an extended `MGMT_OP_ADD_REMOTE_OOB_DATA` payload — the
+smallest surface change that fits the existing opcode (see `UPSTREAM.md` for
+the upstreaming rationale, and `optionB/` for a fallback design using a new
+opcode instead, kept in case upstream maintainers prefer that shape). A
+matching two-patch BlueZ change (`optionA/bluez/`) exposes the same thing as
+`Adapter1.AddRemoteLegacyOOB()` over D-Bus, so `bluetoothd` can drive the
+whole pairing itself instead of needing a userspace tool to talk to the raw
+mgmt socket directly.
 
-| Phase | Scope | State |
-|---|---|---|
-| **0** | kernel debugfs TK injection | ✅ works |
-| **4** | bonded GATT (CCCD subs + ~7s hold) → address adoption + reconnect | ✅ works end to end (2026-09-10) |
-| 1 | `MGMT_OP_ADD_REMOTE_OOB_DATA` `le_legacy_tk` field + BlueZ D-Bus method + `mkbd-provision` rewrite | not started |
-| 2 | kernel + BlueZ upstream submission | not started |
+`rust/mkbd-pair` is the tool that uses this: it reads the keyboard's
+one-time TK over its USB vendor channel, hands it to `bluetoothd` via that
+new D-Bus method, then asks `bluetoothd` to connect and pair — all without
+ever stopping the system's Bluetooth daemon.
+
+## Status
+
+`mkbd-pair auto`'s full flow — detect the keyboard on USB, prompt, pair via
+the D-Bus method above, tell you to unplug, confirm the reconnect over
+Bluetooth — is **hardware-verified end to end** (2026-09-12), including full
+GATT resolution (HID, Battery, Device Information) and a live keyboard input
+device. It isn't perfectly reliable on every single run yet: two transient
+BLE connection timeouts have been seen in testing so far, both cleared by a
+plain retry with no code change needed. See `rust/mkbd-pair/README.md` for
+the details, and `optionA/BUILD.md` / `PROGRESS.md` for the full dated
+history of how this was built and verified.
+
+The kernel and BlueZ patches themselves are further along: hardware-verified
+working (`optionA/BUILD.md`), and `optionA/PLAN.md`/`UPSTREAM.md` lay out
+what's left before proposing them upstream. Phase 0 (a throwaway debugfs-only
+kernel PoC, superseded by the real Option A patches) and the original raw
+`mgmt`-socket Python tools (`test/`) are kept as reference/historical
+material — useful for understanding the protocol or porting it elsewhere —
+but `mkbd-pair` is the one to actually install.
+
+## Installation
+
+This builds and installs three things: a patched kernel Bluetooth module, a
+patched `bluetoothd`, and the `mkbd-pair` tool. All three need root at
+install time; only `mkbd-pair` itself needs root at *run* time.
+
+Tested on Arch Linux. The kernel and BlueZ steps involve patching and
+rebuilding system components — read `optionA/BUILD.md` and
+`optionA/bluez/README.md` before running anything if you want the full
+rationale, not just the commands.
+
+### 1. Patched kernel module
+
+```bash
+# Find your running kernel's upstream version (drop any distro suffix,
+# e.g. 7.2.3-arch1-1 -> 7.2.3), then download the matching source:
+uname -r
+curl -LO "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.3.tar.xz"   # adjust version + v7.x/v6.x to match
+
+# apply patches 0001-0004 (0005 is a selftest patch tied to a specific
+# kernel version — see optionA/BUILD.md, skip it) and build net/bluetooth
+# against your *exact* running kernel — full recipe, including the
+# vermagic-matching gotchas, is in optionA/BUILD.md
+```
+
+Follow `optionA/BUILD.md`'s recipe exactly — matching your running kernel's
+build config/`Module.symvers` is the fiddly part, and that file covers the
+failure modes. Once you have `bluetooth.ko` built and its `vermagic` matches
+`uname -r`:
+
+```bash
+sudo test/install-optionA-module.sh
+sudo reboot
+```
+
+### 2. Patched `bluetoothd`
+
+Follow `optionA/bluez/README.md` (patches a stock **bluez-5.87** source
+tree; adjust the version if your distro ships a different one — the patches
+may need a rebase). Summary:
+
+```bash
+curl -LO https://mirrors.edge.kernel.org/pub/linux/bluetooth/bluez-5.87.tar.xz
+tar -xf bluez-5.87.tar.xz && cd bluez-5.87
+git init -q && git add -A && git commit -q -m baseline
+git am ../optionA/bluez/0001-*.patch ../optionA/bluez/0002-*.patch
+./configure --disable-obex --disable-cups --disable-manpages
+make src/builtin.h   # must run before the next line, once
+make src/bluetoothd
+```
+
+Install it in place of the stock binary (this restarts `bluetoothd`, briefly
+dropping every Bluetooth connection on the machine):
+
+```bash
+sudo test/install-optionA-bluetoothd.sh
+```
+
+Then enable the `--experimental` flag `mkbd-pair` needs (for
+`Adapter1.ConnectDevice()`, an experimental BlueZ method):
+
+```bash
+sudo systemctl edit bluetooth.service
+```
+
+Add:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/lib/bluetooth/bluetoothd --experimental
+```
+
+Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart bluetooth
+```
+
+### 3. `mkbd-pair`
+
+```bash
+cd rust/mkbd-pair
+cargo build --release
+```
+
+Plug the keyboard in over USB, then test pairing manually:
+
+```bash
+sudo target/release/mkbd-pair dbus-pair
+```
+
+If that works, install it as an auto-pair-on-plug-in service (needs
+`zenity` and a notification daemon running in your graphical session):
+
+```bash
+sudo rust/mkbd-pair/packaging/install.sh
+```
+
+From then on, plugging the keyboard in over USB prompts you to pair; once
+paired, unplug the cable and it reconnects over Bluetooth on its own.
 
 ## Layout
 
 ```
-PLAN.md                         the 3-phase plan (debugfs PoC -> MGMT field -> upstream)
-UPSTREAM.md                     turning the patch into a mainline series + RFC cover letter
-PLUGIN-PLAN.md                  packaging as an AUR / Omarchy install (DKMS + hooks + udev)
-PROGRESS.md                     dated worklog + current state + next actions
-kernel/                         kernel patches (against linux-7.2.3)
-  0001-Bluetooth-SMP-inject-LE-legacy-OOB-Temporary-Key-via-.patch   Phase 0
-  README.md                     how to apply / build / test
-bluez/                          BlueZ patches (Phase 1, empty for now)
-pairmodernkeyboard.sh           ← the command: Phase-0 pair + Phase-4 GATT + adoption check
-test/
-  install-module.sh / uninstall-module.sh   swap the patched bluetooth.ko on disk (+ persist uhid); reboot
-  tk-pair.py                    Phase-0 engine (F1/F2/F3 -> inject TK -> MGMT Pair Device -> bond -> phase4)
-  phase4.py                    Phase-4: bonded GATT provisioning over raw L2CAP ATT (also importable)
-  hw-test.sh                    back-compat stub -> ../pairmodernkeyboard.sh
-notes/
-  smp-codepaths.md              analysis of the kernel SMP paths the patch touches
-build/                          (gitignored) kernel source tree, scratch
+README.md, LICENSE               this file, MIT license
+PLAN.md                          the phased plan (debugfs PoC -> Option A -> upstream)
+UPSTREAM.md                      turning the patches into a mainline series + RFC cover letter
+PLUGIN-PLAN.md                   packaging as an AUR / Omarchy install (DKMS + hooks + udev) -- not yet built
+PROGRESS.md                      detailed dated worklog -- not required reading, but has the full run history
+kernel/                          Phase 0 kernel patch (debugfs PoC, superseded by optionA/) + README
+optionA/                         the real fix: kernel patches 0001-0004, BlueZ patches, build docs,
+                                    the bash-based reference autopair implementation
+optionB/                         a fallback kernel-API design (new mgmt opcode instead of extending
+                                    the existing one), kept in case upstream prefers that shape -- see UPSTREAM.md
+rust/mkbd-pair/                  the tool to install -- `dbus-pair` (manual) and `auto` (udev-triggered)
+  packaging/                     install.sh + udev rule + systemd service for the auto-pair flow
+test/, lib/                      the original Python/raw-mgmt-socket tools mkbd-pair was ported from --
+                                    reference implementation, kept for protocol study, superseded by rust/mkbd-pair
+notes/                           analysis of the kernel SMP paths the patches touch
+.github/workflows/               CI: verifies the kernel/BlueZ patches still apply + build, and that
+                                    mkbd-pair still builds/tests/lints clean
+build/                           (gitignored) kernel/BlueZ source trees, scratch
 ```
 
-## Status — 2026-09-10: END TO END ON HARDWARE 🎉
+## License
 
-Native Linux pairing **and reconnect** for the MS Modern Keyboard, no Windows,
-no `HCI_CHANNEL_USER`:
-
-1. **Phase 0** — patched `bluetooth.ko` (`kernel/0001-*.patch`): kernel SMP runs
-   LE legacy OOB with a debugfs-injected F3 TK; `build_pairing_cmd()` clears SC,
-   sets OOB-present, and offers `SMP_DIST_ID_KEY` so we distribute host identity
-   in phase 3. MGMT Pair Device → authenticated legacy LTK.
-2. **Phase 4** (`test/phase4.py`) — a bonded L2CAP ATT connection (encrypted
-   with the kernel LTK): subscribe the 9 report/vendor CCCDs, hold until the
-   keyboard drops it ~7 s later. That's the whole minimal sequence — the
-   keyboard then **adopts its generated address** (USB F1 confirms
-   `current_addr` advanced). The `BOND-COMPLETION.md` GATT discovery and the
-   LED / Feature-`0x24` writes turned out **not** to be needed (`--discover`
-   / `--writes` re-enable them).
-3. `bluetoothctl connect <addr>` then works through normal `bluetoothd` —
-   `Connected: yes, Bonded: yes`, `input-keyboard`, battery %, kernel HID input
-   device created (`uhid` is auto-loaded by `install-module.sh`).
-
-`sudo ./pairmodernkeyboard.sh` runs Phase 0 → Phase 4 → adoption check (~15 s).
-`--diag` adds the btmon SMP trace + dmesg; `--no-phase4` stops after the pair.
-(It is a preflight wrapper around `test/tk-pair.py` + `test/phase4.py`.)
-
-`PROGRESS.md` has the full run logs, the minimal-phase-4 breakdown, and the
-GATT DB map. Next: **Phase 1** — swap the debugfs knob for a real
-`MGMT_OP_ADD_REMOTE_OOB_DATA` field + BlueZ D-Bus method (`PLAN.md`).
-
----
-
-## Earlier — 2026-09-10: Phase 0 validated on hardware
-
-Patch `kernel/0001-*.patch` (vs linux-7.2.3; applies clean to linux-7.1.9).
-Built `artifacts/bluetooth-7.1.9-arch1-2-tkinj.ko` for the running kernel,
-installed via `test/install-module.sh` + reboot.
-
-`sudo test/hw-test.sh` → **`pair status: success`**, authenticated legacy LTK
-(`key_type=1`), bond written to `/var/lib/bluetooth/<adapter>/<addr>/info`. The
-in-kernel Security Manager ran LE legacy OOB SMP with the debugfs-injected F3
-TK, driven by MGMT Pair Device — no controller seizure. TK byte order: **as-is**.
-Full run + btmon breakdown in `PROGRESS.md`.
-
-Open: whether the keyboard reconnects/types on this phase-3-only bond (needs
-phase-4 GATT + hold per `modernkeyboard/docs/BOND-COMPLETION.md`) — orthogonal
-to TK injection.
-
-Next: **Phase 1** — move the TK from the debugfs knob to a real
-`MGMT_OP_ADD_REMOTE_OOB_DATA` field + a BlueZ D-Bus method (see `PLAN.md`).
+MIT — see [`LICENSE`](LICENSE). The kernel and BlueZ patch files are diffs
+against GPL-2.0/LGPL-2.1 projects and carry those projects' license terms.

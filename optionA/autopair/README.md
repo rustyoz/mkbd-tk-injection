@@ -1,5 +1,11 @@
 # Option A auto-pair — detect, prompt, pair, confirm, reconnect
 
+**Superseded by `rust/mkbd-pair` (`rust/mkbd-pair/packaging/install.sh`).**
+This bash/Python implementation is kept as a reference — it's what the Rust
+`mkbd-pair auto`/`dbus-pair` commands were ported from and hardware-verified
+against — but the Rust tool is the one to actually install; see the repo
+README's Installation section.
+
 End-to-end UX on top of the Option A kernel patches: plug the keyboard in over
 USB, get asked whether to pair it, click yes, get told to unplug the cable,
 and get confirmation once it's back on Bluetooth. No manual `bluetoothctl`.
