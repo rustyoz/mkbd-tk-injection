@@ -1,0 +1,217 @@
+From d95fcb4325dacbfdd8e5f8c801d94cf5ee510630 Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 12:23:52 +1000
+Subject: [PATCH 1/5] Bluetooth: mgmt: accept an LE legacy OOB Temporary Key
+
+MGMT_OP_ADD_REMOTE_OOB_DATA can carry P-192 and P-256 Secure Connections
+OOB data, but there is no way to hand the kernel the 128-bit Temporary
+Key used by LE *legacy* OOB pairing.  Peripherals that only implement LE
+legacy OOB and reject every non-OOB Pairing Request - the Microsoft
+Modern Keyboard (model 1780) is one - therefore cannot be paired by the
+in-kernel Security Manager at all.
+
+Accept a third, longer payload for the existing opcode.  It is the
+extended (P-192 + P-256) layout with a flags octet and a 16-byte
+le_legacy_tk appended, so old userspace sending either of the previous
+two sizes is unaffected and no new opcode is burned:
+
+	struct mgmt_addr_info addr;
+	__u8 hash192[16];
+	__u8 rand192[16];
+	__u8 hash256[16];
+	__u8 rand256[16];
+	__u8 flags;
+	__u8 le_legacy_tk[16];
+
+MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT in flags is what arms the key, so an
+all-zero Temporary Key - a legal value - stays distinguishable from "no
+key supplied".  The new length is only accepted for LE addresses, the
+P-192 values must be zero exactly as they must be for the extended
+layout on LE, and unknown flag bits are rejected; all three give
+MGMT_STATUS_INVALID_PARAMS rather than being quietly ignored.
+
+The key is stored in struct oob_data next to the SC OOB material and is
+treated as a secret throughout: it is never logged, the previous value is
+wiped on replace, and struct oob_data is now freed with kfree_sensitive().
+MGMT_OP_ADD_REMOTE_OOB_DATA is not in the untrusted opcode set, so a
+caller already needs CAP_NET_ADMIN on the management socket.
+
+Nothing consumes the key yet; that is added in the next patch.
+
+Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+ include/net/bluetooth/hci_core.h |  4 ++-
+ include/net/bluetooth/mgmt.h     | 13 ++++++++
+ net/bluetooth/hci_core.c         | 18 +++++++++--
+ net/bluetooth/mgmt.c             | 54 ++++++++++++++++++++++++++++++--
+ 4 files changed, 83 insertions(+), 6 deletions(-)
+
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index 3df59849d..ac0c3c581 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -235,6 +235,8 @@ struct oob_data {
+ 	u8 rand192[16];
+ 	u8 hash256[16];
+ 	u8 rand256[16];
++	bool le_legacy_tk_present;
++	u8 le_legacy_tk[16];
+ };
+ 
+ struct adv_info {
+@@ -1880,7 +1882,7 @@ struct oob_data *hci_find_remote_oob_data(struct hci_dev *hdev,
+ 					  bdaddr_t *bdaddr, u8 bdaddr_type);
+ int hci_add_remote_oob_data(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 			    u8 bdaddr_type, u8 *hash192, u8 *rand192,
+-			    u8 *hash256, u8 *rand256);
++			    u8 *hash256, u8 *rand256, u8 *le_legacy_tk);
+ int hci_remove_remote_oob_data(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 			       u8 bdaddr_type);
+ 
+diff --git a/include/net/bluetooth/mgmt.h b/include/net/bluetooth/mgmt.h
+index 08daed7a9..7c2eb219f 100644
+--- a/include/net/bluetooth/mgmt.h
++++ b/include/net/bluetooth/mgmt.h
+@@ -342,6 +342,19 @@ struct mgmt_cp_add_remote_oob_ext_data {
+ 	__u8	rand256[16];
+ } __packed;
+ #define MGMT_ADD_REMOTE_OOB_EXT_DATA_SIZE (MGMT_ADDR_INFO_SIZE + 64)
++struct mgmt_cp_add_remote_oob_le_legacy_data {
++	struct mgmt_addr_info addr;
++	__u8	hash192[16];
++	__u8	rand192[16];
++	__u8	hash256[16];
++	__u8	rand256[16];
++	__u8	flags;
++	__u8	le_legacy_tk[16];
++} __packed;
++#define MGMT_ADD_REMOTE_OOB_LE_LEGACY_DATA_SIZE (MGMT_ADDR_INFO_SIZE + 81)
++
++/* Flags valid for the MGMT_ADD_REMOTE_OOB_LE_LEGACY_DATA_SIZE payload */
++#define MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT	0x01
+ 
+ #define MGMT_OP_REMOVE_REMOTE_OOB_DATA	0x0022
+ struct mgmt_cp_remove_remote_oob_data {
+diff --git a/net/bluetooth/hci_core.c b/net/bluetooth/hci_core.c
+index 5ba9fe826..e0a50061b 100644
+--- a/net/bluetooth/hci_core.c
++++ b/net/bluetooth/hci_core.c
+@@ -1487,7 +1487,7 @@ int hci_remove_remote_oob_data(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 	BT_DBG("%s removing %pMR (%u)", hdev->name, bdaddr, bdaddr_type);
+ 
+ 	list_del(&data->list);
+-	kfree(data);
++	kfree_sensitive(data);
+ 
+ 	return 0;
+ }
+@@ -1498,13 +1498,13 @@ void hci_remote_oob_data_clear(struct hci_dev *hdev)
+ 
+ 	list_for_each_entry_safe(data, n, &hdev->remote_oob_data, list) {
+ 		list_del(&data->list);
+-		kfree(data);
++		kfree_sensitive(data);
+ 	}
+ }
+ 
+ int hci_add_remote_oob_data(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 			    u8 bdaddr_type, u8 *hash192, u8 *rand192,
+-			    u8 *hash256, u8 *rand256)
++			    u8 *hash256, u8 *rand256, u8 *le_legacy_tk)
+ {
+ 	struct oob_data *data;
+ 
+@@ -1543,6 +1543,18 @@ int hci_add_remote_oob_data(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 			data->present = 0x01;
+ 	}
+ 
++	/* The LE legacy pairing Temporary Key is a secret: it is never
++	 * logged and the previous value is wiped rather than just dropped.
++	 */
++	memzero_explicit(data->le_legacy_tk, sizeof(data->le_legacy_tk));
++	if (le_legacy_tk) {
++		memcpy(data->le_legacy_tk, le_legacy_tk,
++		       sizeof(data->le_legacy_tk));
++		data->le_legacy_tk_present = true;
++	} else {
++		data->le_legacy_tk_present = false;
++	}
++
+ 	BT_DBG("%s for %pMR", hdev->name, bdaddr);
+ 
+ 	return 0;
+diff --git a/net/bluetooth/mgmt.c b/net/bluetooth/mgmt.c
+index c16b0b80c..f69f15e47 100644
+--- a/net/bluetooth/mgmt.c
++++ b/net/bluetooth/mgmt.c
+@@ -5895,7 +5895,7 @@ static int add_remote_oob_data(struct sock *sk, struct hci_dev *hdev,
+ 
+ 		err = hci_add_remote_oob_data(hdev, &cp->addr.bdaddr,
+ 					      cp->addr.type, cp->hash,
+-					      cp->rand, NULL, NULL);
++					      cp->rand, NULL, NULL, NULL);
+ 		if (err < 0)
+ 			status = MGMT_STATUS_FAILED;
+ 		else
+@@ -5952,7 +5952,57 @@ static int add_remote_oob_data(struct sock *sk, struct hci_dev *hdev,
+ 
+ 		err = hci_add_remote_oob_data(hdev, &cp->addr.bdaddr,
+ 					      cp->addr.type, hash192, rand192,
+-					      hash256, rand256);
++					      hash256, rand256, NULL);
++		if (err < 0)
++			status = MGMT_STATUS_FAILED;
++		else
++			status = MGMT_STATUS_SUCCESS;
++
++		err = mgmt_cmd_complete(sk, hdev->id,
++					MGMT_OP_ADD_REMOTE_OOB_DATA,
++					status, &cp->addr, sizeof(cp->addr));
++	} else if (len == MGMT_ADD_REMOTE_OOB_LE_LEGACY_DATA_SIZE) {
++		struct mgmt_cp_add_remote_oob_le_legacy_data *cp = data;
++		u8 *rand256, *hash256, *le_legacy_tk = NULL;
++		u8 status;
++
++		/* An LE legacy pairing Temporary Key is only meaningful for
++		 * an LE address, and as for the extended payload the 192-bit
++		 * values have to stay zero on LE.  Reject anything else
++		 * rather than silently ignoring it.
++		 */
++		if (!bdaddr_type_is_le(cp->addr.type) ||
++		    memcmp(cp->rand192, ZERO_KEY, 16) ||
++		    memcmp(cp->hash192, ZERO_KEY, 16) ||
++		    (cp->flags & ~MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT)) {
++			err = mgmt_cmd_complete(sk, hdev->id,
++						MGMT_OP_ADD_REMOTE_OOB_DATA,
++						MGMT_STATUS_INVALID_PARAMS,
++						addr, sizeof(*addr));
++			goto unlock;
++		}
++
++		/* The presence flag is what makes the key take effect, so an
++		 * all-zero Temporary Key stays distinguishable from "none".
++		 */
++		if (cp->flags & MGMT_OOB_FLAG_LE_LEGACY_TK_PRESENT)
++			le_legacy_tk = cp->le_legacy_tk;
++
++		/* In case one of the P-256 values is set to zero, then just
++		 * disable OOB data for P-256.
++		 */
++		if (!memcmp(cp->rand256, ZERO_KEY, 16) ||
++		    !memcmp(cp->hash256, ZERO_KEY, 16)) {
++			rand256 = NULL;
++			hash256 = NULL;
++		} else {
++			rand256 = cp->rand256;
++			hash256 = cp->hash256;
++		}
++
++		err = hci_add_remote_oob_data(hdev, &cp->addr.bdaddr,
++					      cp->addr.type, NULL, NULL,
++					      hash256, rand256, le_legacy_tk);
+ 		if (err < 0)
+ 			status = MGMT_STATUS_FAILED;
+ 		else
+-- 
+2.55.0
+

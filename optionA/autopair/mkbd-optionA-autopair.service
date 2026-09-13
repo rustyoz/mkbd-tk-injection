@@ -1,0 +1,13 @@
+[Unit]
+Description=Auto-detect and offer to pair the Modern Keyboard (Option A, mgmt LE legacy OOB TK)
+After=bluetooth.service
+Wants=bluetooth.service
+# udev fires this per hidraw "add"; a bare (non-templated) oneshot means a
+# second trigger while one run is still going just re-queues the same unit.
+# The script's own flock (/run/lock/mkbd-optionA-autopair.lock) is the real
+# guard against two runs overlapping.
+
+[Service]
+Type=oneshot
+ExecStart=/home/russell/Work/mkbd-tk-injection/optionA/autopair/mkbd-optionA-autopair
+TimeoutStartSec=300

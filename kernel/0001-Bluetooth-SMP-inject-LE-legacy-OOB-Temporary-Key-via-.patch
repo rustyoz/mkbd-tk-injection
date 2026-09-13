@@ -1,0 +1,304 @@
+From 1c0cdddd025e8e15b2aca4ba18206e0fc59d0d77 Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Thu, 10 Sep 2026 00:09:46 +1000
+Subject: [PATCH] Bluetooth: SMP: inject LE legacy OOB Temporary Key via
+ debugfs (PoC)
+
+The in-kernel Security Manager has no way to accept a 128-bit LE legacy
+OOB Temporary Key: tk_request() only ever fills smp->tk with 0 (Just
+Works) or a 32-bit passkey.  NoInputNoOutput devices that mandate LE
+legacy OOB and reject every non-OOB Pairing Request (e.g. the Microsoft
+Modern Keyboard, model 1780) therefore cannot be paired at all.
+
+Add a per-adapter debugfs knob, le_legacy_oob_tk, taking a peer address +
+address type + the 16-byte TK obtained out of band.  When an entry
+exists for the peer:
+
+ - build_pairing_cmd() clears SMP_AUTH_SC (an SC-capable adapter sets it,
+   which would take the SC-OOB path), sets oob_flag = SMP_OOB_PRESENT,
+   and offers SMP_DIST_ID_KEY so we distribute our IRK + Identity Address
+   in phase 3 -- this device only persists the bond / adopts its
+   generated address once the initiator sends those PDUs;
+ - get_auth_method() returns REQ_OOB so the "can MITM be achieved?"
+   checks don't reject a NoInputNoOutput pair before tk_request() runs;
+ - tk_request() copies the TK into smp->tk, marks it valid and
+   MITM-authenticated, and raises pending_sec_level to BT_SECURITY_HIGH.
+
+The legacy confirm/random state machine consumes smp->tk directly, so
+nothing else changes.  REQ_OOB is only inspected in Secure Connections
+code paths, which are not reached here.
+
+Proof of concept.  The upstreamable form carries the TK in struct
+oob_data via a new MGMT_OP_ADD_REMOTE_OOB_DATA field.
+
+Not-Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+ net/bluetooth/hci_debugfs.c |   3 +
+ net/bluetooth/smp.c         | 194 ++++++++++++++++++++++++++++++++++++
+ net/bluetooth/smp.h         |   3 +
+ 3 files changed, 200 insertions(+)
+
+diff --git a/net/bluetooth/hci_debugfs.c b/net/bluetooth/hci_debugfs.c
+index 0635e46..83ce2af 100644
+--- a/net/bluetooth/hci_debugfs.c
++++ b/net/bluetooth/hci_debugfs.c
+@@ -1255,6 +1255,9 @@ void hci_debugfs_create_le(struct hci_dev *hdev)
+ 	debugfs_create_file("quirk_simultaneous_discovery", 0644,
+ 			    hdev->debugfs, hdev,
+ 			    &quirk_simultaneous_discovery_fops);
++
++	/* LE legacy OOB Temporary Key injection (proof of concept) */
++	smp_le_legacy_oob_tk_debugfs_create(hdev);
+ }
+ 
+ void hci_debugfs_create_conn(struct hci_conn *conn)
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index c447095..a6df9fe 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -18,6 +18,7 @@
+ */
+ 
+ #include <linux/debugfs.h>
++#include <linux/hex.h>
+ #include <linux/scatterlist.h>
+ #include <crypto/aes-cbc-macs.h>
+ #include <crypto/aes.h>
+@@ -126,6 +127,153 @@ struct smp_chan {
+ 	struct crypto_kpp	*tfm_ecdh;
+ };
+ 
++/* ------------------------------------------------------------------------
++ * LE legacy pairing OOB Temporary Key injection (proof of concept)
++ *
++ * The in-kernel Security Manager has no way to accept a 128-bit LE legacy
++ * OOB Temporary Key: tk_request() only ever fills smp->tk with 0 (Just
++ * Works) or a 32-bit passkey.  Some NoInputNoOutput devices (e.g. the
++ * Microsoft Modern Keyboard, model 1780) *require* LE legacy OOB and
++ * reject a non-OOB Pairing Request outright, so they cannot be paired.
++ *
++ * This is a throwaway PoC: userspace writes the peer address + the TK it
++ * obtained out of band to
++ *   /sys/kernel/debug/bluetooth/hciX/le_legacy_oob_tk
++ * as "AA:BB:CC:DD:EE:FF <type> <32 hex digits>"  (type 0 = public,
++ * 1 = random).  The next legacy pairing with that peer then uses the TK.
++ * Writing an all-zero TK removes the entry.  Entries persist until
++ * overwritten or reboot.
++ *
++ * A proper implementation carries the TK in struct oob_data via a new
++ * MGMT_OP_ADD_REMOTE_OOB_DATA field -- see docs/TK-INJECTION-PLAN.md in
++ * the mkbd-tk-injection repo.
++ * ------------------------------------------------------------------------ */
++
++struct smp_le_oob_tk {
++	struct list_head list;
++	bdaddr_t	 bdaddr;
++	u8		 bdaddr_type;	/* ADDR_LE_DEV_*: 0 public, 1 random */
++	u8		 tk[16];
++};
++
++static LIST_HEAD(smp_le_oob_tk_list);
++static DEFINE_MUTEX(smp_le_oob_tk_lock);
++
++/* Look up a stored legacy OOB TK for @bdaddr/@bdaddr_type.  If @tk is
++ * non-NULL the 16-byte key is copied out.  Returns true if found.
++ * @bdaddr_type is hcon->dst_type as-is (ADDR_LE_DEV_* convention).
++ */
++static bool smp_le_legacy_oob_tk_get(const bdaddr_t *bdaddr, u8 bdaddr_type,
++				     u8 tk[16])
++{
++	struct smp_le_oob_tk *e;
++	bool found = false;
++
++	mutex_lock(&smp_le_oob_tk_lock);
++	list_for_each_entry(e, &smp_le_oob_tk_list, list) {
++		if (e->bdaddr_type != bdaddr_type || bacmp(&e->bdaddr, bdaddr))
++			continue;
++		if (tk)
++			memcpy(tk, e->tk, 16);
++		found = true;
++		break;
++	}
++	mutex_unlock(&smp_le_oob_tk_lock);
++
++	return found;
++}
++
++static void smp_le_legacy_oob_tk_set(const bdaddr_t *bdaddr, u8 bdaddr_type,
++				     const u8 tk[16])
++{
++	struct smp_le_oob_tk *e;
++	bool is_zero = true;
++	int i;
++
++	for (i = 0; i < 16; i++) {
++		if (tk[i]) {
++			is_zero = false;
++			break;
++		}
++	}
++
++	mutex_lock(&smp_le_oob_tk_lock);
++
++	list_for_each_entry(e, &smp_le_oob_tk_list, list) {
++		if (e->bdaddr_type != bdaddr_type || bacmp(&e->bdaddr, bdaddr))
++			continue;
++		if (is_zero) {
++			list_del(&e->list);
++			kfree(e);
++		} else {
++			memcpy(e->tk, tk, 16);
++		}
++		goto out;
++	}
++
++	if (is_zero)
++		goto out;
++
++	e = kzalloc(sizeof(*e), GFP_KERNEL);
++	if (!e)
++		goto out;
++	bacpy(&e->bdaddr, bdaddr);
++	e->bdaddr_type = bdaddr_type;
++	memcpy(e->tk, tk, 16);
++	list_add(&e->list, &smp_le_oob_tk_list);
++
++out:
++	mutex_unlock(&smp_le_oob_tk_lock);
++}
++
++static ssize_t le_legacy_oob_tk_write(struct file *file,
++				      const char __user *user_buf,
++				      size_t count, loff_t *ppos)
++{
++	unsigned int b[6], type;
++	u8 bdaddr_type, tk[16];
++	char buf[64], tkhex[33];
++	bdaddr_t bdaddr;
++	int i, n;
++
++	if (count >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, user_buf, count))
++		return -EFAULT;
++	buf[count] = '\0';
++
++	n = sscanf(buf, "%x:%x:%x:%x:%x:%x %u %32s",
++		   &b[5], &b[4], &b[3], &b[2], &b[1], &b[0], &type, tkhex);
++	if (n != 8 || type > 1 || strlen(tkhex) != 32)
++		return -EINVAL;
++
++	for (i = 0; i < 6; i++) {
++		if (b[i] > 0xff)
++			return -EINVAL;
++		bdaddr.b[i] = b[i];
++	}
++	bdaddr_type = type;
++
++	if (hex2bin(tk, tkhex, 16))
++		return -EINVAL;
++
++	smp_le_legacy_oob_tk_set(&bdaddr, bdaddr_type, tk);
++
++	return count;
++}
++
++static const struct file_operations le_legacy_oob_tk_fops = {
++	.open	= simple_open,
++	.write	= le_legacy_oob_tk_write,
++	.llseek	= noop_llseek,
++};
++
++void smp_le_legacy_oob_tk_debugfs_create(struct hci_dev *hdev)
++{
++	debugfs_create_file("le_legacy_oob_tk", 0200, hdev->debugfs, hdev,
++			    &le_legacy_oob_tk_fops);
++}
++
+ /* These debug key values are defined in the SMP section of the core
+  * specification. debug_pk is the public debug key and debug_sk the
+  * private debug key.
+@@ -646,6 +794,25 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 	if (hci_dev_test_flag(hdev, HCI_PRIVACY))
+ 		local_dist |= SMP_DIST_ID_KEY;
+ 
++	/* LE legacy OOB: when userspace supplied a legacy Temporary Key for
++	 * this peer, force legacy pairing (clear SC) and advertise OOB-present.
++	 * This keyboard class does LE legacy OOB only and hangs up on a Pairing
++	 * Request that lacks the OOB flag; an SC-capable adapter otherwise has
++	 * SMP_AUTH_SC set here and would take the SC-OOB path instead.
++	 *
++	 * Also distribute our identity (IRK + Identity Address) in phase 3 by
++	 * offering SMP_DIST_ID_KEY: this device only persists the bond and
++	 * adopts its generated address after the initiator sends Identity
++	 * Information + Identity Address Information.  The kernel otherwise
++	 * offers this only under HCI_PRIVACY.
++	 */
++	if (hcon->type == LE_LINK &&
++	    smp_le_legacy_oob_tk_get(&hcon->dst, hcon->dst_type, NULL)) {
++		authreq &= ~SMP_AUTH_SC;
++		oob_flag = SMP_OOB_PRESENT;
++		local_dist |= SMP_DIST_ID_KEY;
++	}
++
+ 	if (hci_dev_test_flag(hdev, HCI_SC_ENABLED) &&
+ 	    (authreq & SMP_AUTH_SC)) {
+ 		struct oob_data *oob_data;
+@@ -821,6 +988,16 @@ static u8 get_auth_method(struct smp_chan *smp, u8 local_io, u8 remote_io)
+ 	if (test_bit(SMP_FLAG_SC, &smp->flags))
+ 		return sc_method[remote_io][local_io];
+ 
++	/* LE legacy OOB is MITM-capable irrespective of IO capabilities.  If
++	 * userspace supplied a Temporary Key for this peer, select it so the
++	 * "can MITM be achieved?" checks in the pairing handlers don't reject
++	 * a NoInputNoOutput pairing before tk_request() runs.
++	 */
++	if (smp->conn && smp->conn->hcon->type == LE_LINK &&
++	    smp_le_legacy_oob_tk_get(&smp->conn->hcon->dst,
++				     smp->conn->hcon->dst_type, NULL))
++		return REQ_OOB;
++
+ 	return gen_method[remote_io][local_io];
+ }
+ 
+@@ -837,6 +1014,23 @@ static int tk_request(struct l2cap_conn *conn, u8 remote_oob, u8 auth,
+ 	memset(smp->tk, 0, sizeof(smp->tk));
+ 	clear_bit(SMP_FLAG_TK_VALID, &smp->flags);
+ 
++	/* LE legacy OOB: if userspace supplied a 128-bit Temporary Key for
++	 * this peer out of band, use it.  This is the only MITM-capable
++	 * method available to a NoInputNoOutput/NoInputNoOutput pairing, and
++	 * the legacy confirm/random state machine (smp_confirm/smp_random)
++	 * consumes smp->tk directly, so no further special-casing is needed.
++	 */
++	if (!test_bit(SMP_FLAG_SC, &smp->flags) && hcon->type == LE_LINK &&
++	    smp_le_legacy_oob_tk_get(&hcon->dst, hcon->dst_type, smp->tk)) {
++		smp->method = REQ_OOB;
++		set_bit(SMP_FLAG_TK_VALID, &smp->flags);
++		set_bit(SMP_FLAG_MITM_AUTH, &smp->flags);
++		if (hcon->pending_sec_level < BT_SECURITY_HIGH)
++			hcon->pending_sec_level = BT_SECURITY_HIGH;
++		bt_dev_dbg(hcon->hdev, "using LE legacy OOB TK");
++		return 0;
++	}
++
+ 	bt_dev_dbg(hcon->hdev, "auth:%u lcl:%u rem:%u", auth, local_io,
+ 		   remote_io);
+ 
+diff --git a/net/bluetooth/smp.h b/net/bluetooth/smp.h
+index eac27bd..b45e719 100644
+--- a/net/bluetooth/smp.h
++++ b/net/bluetooth/smp.h
+@@ -196,6 +196,9 @@ int smp_force_bredr(struct hci_dev *hdev, bool enable);
+ int smp_register(struct hci_dev *hdev);
+ void smp_unregister(struct hci_dev *hdev);
+ 
++/* LE legacy OOB Temporary Key injection (proof of concept) */
++void smp_le_legacy_oob_tk_debugfs_create(struct hci_dev *hdev);
++
+ #if IS_ENABLED(CONFIG_BT_SELFTEST_SMP)
+ 
+ int bt_selftest_smp(void);
+-- 
+2.55.0
+

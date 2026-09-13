@@ -1,0 +1,14 @@
+build/
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+Module.symvers
+modules.order
+*.tar.xz
+artifacts/
+__pycache__/
+*.pyc
+target/
+.claude/

@@ -1,0 +1,10 @@
+# Trigger the Option A auto-pair helper when the Microsoft Modern Keyboard's
+# vendor USB interface (COL03, interface 0 of 045e:0815) appears. Mirrors the
+# "PnP replacement" design in modernkeyboard/docs/PROTOCOL.md, wired to the
+# Option A pairing path in this repo instead of a to-be-written BlueZ agent.
+#
+# Install: see install.sh in this directory.
+ACTION=="add", SUBSYSTEM=="hidraw", \
+  ENV{ID_VENDOR_ID}=="045e", ENV{ID_MODEL_ID}=="0815", \
+  ENV{ID_USB_INTERFACE_NUM}=="00", \
+  TAG+="systemd", ENV{SYSTEMD_WANTS}+="mkbd-optionA-autopair.service"

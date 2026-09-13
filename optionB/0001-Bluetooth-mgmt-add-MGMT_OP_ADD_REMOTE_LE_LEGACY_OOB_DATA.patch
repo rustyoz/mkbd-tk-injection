@@ -1,0 +1,593 @@
+From 075114cb19bf97be3f190594d54f09aac3cf718f Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 12:28:27 +1000
+Subject: [PATCH 1/5] Bluetooth: mgmt: add
+ MGMT_OP_ADD_REMOTE_LE_LEGACY_OOB_DATA
+
+LE legacy pairing can derive its Temporary Key from data exchanged out of
+band: both sides use the same 128-bit TK as the key of the c1 confirm and
+s1 STK generation functions (Core specification Vol 3, Part H, 2.2.3 and
+2.2.4).  The kernel has no way to accept such a key.  tk_request() only
+ever fills smp->tk with zero (Just Works) or a 32-bit passkey, so a peer
+that mandates LE legacy OOB - for example the Microsoft Modern Keyboard
+(model 1780), a NoInputNoOutput device that rejects any Pairing Request
+without the OOB flag - cannot be paired at all.
+
+Add Remote OOB Data cannot carry the key.  Its payload holds hash/rand
+commitment pairs for BR/EDR (P-192) and LE Secure Connections (P-256),
+never key material, and the two payload layouts it already has are
+discriminated by length alone.  Overloading a third length onto it would
+make a command that today only publishes commitments start accepting a
+secret, with no way for userspace to tell whether a given kernel supports
+it.  Use a dedicated command instead, which a caller can probe for in the
+Read Management Supported Commands response.
+
+This patch adds the command and its storage; the Security Manager side
+follows in the next patches.
+
+The store is per controller, keyed on address and address type, with
+atomic replace: a lookup racing with an add sees either the old or the new
+entry.  It is mutated under a dedicated spinlock and read under RCU, so
+the Security Manager can look an entry up from its own context without
+taking hdev->lock.  Entries hold raw key material, so they are wiped when
+released, never returned to userspace, and never logged.  Entries are
+dropped when the controller is powered down unless the caller asked for
+Persistent.
+
+Also add Remove Remote LE Legacy OOB Data, without which a Persistent
+entry could never be deleted.
+
+Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+ .../networking/bluetooth-le-legacy-oob.rst    | 111 ++++++++++++
+ Documentation/networking/index.rst            |   1 +
+ MAINTAINERS                                   |   1 +
+ include/net/bluetooth/hci_core.h              |  30 ++++
+ include/net/bluetooth/mgmt.h                  |  19 +++
+ net/bluetooth/hci_core.c                      | 160 ++++++++++++++++++
+ net/bluetooth/hci_sync.c                      |   4 +
+ net/bluetooth/mgmt.c                          |  83 +++++++++
+ 8 files changed, 409 insertions(+)
+ create mode 100644 Documentation/networking/bluetooth-le-legacy-oob.rst
+
+diff --git a/Documentation/networking/bluetooth-le-legacy-oob.rst b/Documentation/networking/bluetooth-le-legacy-oob.rst
+new file mode 100644
+index 000000000..685c29d12
+--- /dev/null
++++ b/Documentation/networking/bluetooth-le-legacy-oob.rst
+@@ -0,0 +1,111 @@
++.. SPDX-License-Identifier: GPL-2.0
++
++=======================================
++Bluetooth LE legacy pairing OOB data
++=======================================
++
++LE legacy pairing can use a 128-bit Temporary Key (TK) that both sides
++obtained over an out of band (OOB) channel.  The TK is used as the key of
++the ``c1`` confirm function and of the ``s1`` STK generation function
++(Bluetooth Core specification, Vol 3, Part H, sections 2.2.3 and 2.2.4).
++
++Unlike LE Secure Connections OOB, which exchanges a commitment value and a
++random number, LE legacy OOB exchanges the key itself.  ``Add Remote OOB
++Data`` (``0x0021``) therefore cannot carry it: its payload holds only
++``hash``/``rand`` commitment pairs.  Two dedicated commands exist instead.
++
++Both commands require a trusted (``CAP_NET_ADMIN``) management socket and
++are per controller.
++
++Add Remote LE Legacy OOB Data Command
++=====================================
++
++::
++
++	Command Code:		0x005c
++	Controller Index:	<controller id>
++	Command Parameters:	Address (6 Octets)
++				Address_Type (1 Octet)
++				Flags (1 Octet)
++				TK (16 Octets)
++	Return Parameters:	Address (6 Octets)
++				Address_Type (1 Octet)
++
++Possible values for the ``Address_Type`` parameter:
++
++.. flat-table::
++   :widths: 1 4
++
++   * - 1
++     - LE Public
++
++   * - 2
++     - LE Random
++
++``Address`` must be the address the controller will connect to and that the
++peer uses in the pairing transaction, that is the identity address for a
++peer that does not use a resolvable private address.  Entries are not
++matched against resolved identity addresses.
++
++Possible values for the ``Flags`` parameter:
++
++.. flat-table::
++   :widths: 1 4
++
++   * - 0x01
++     - Persistent
++
++   * - 0x02
++     - Force Legacy
++
++Without ``Persistent`` the entry is dropped when the controller is powered
++down.  With it, the entry survives power cycles and is only removed by
++``Remove Remote LE Legacy OOB Data`` or by unregistering the controller.
++The kernel does not write the key to persistent storage in either case.
++
++``Force Legacy`` makes the kernel clear the Secure Connections bit of
++``AuthReq`` in the pairing request or response sent to this peer, so that
++legacy pairing (and hence the stored TK) is used even though the controller
++is Secure Connections capable.  Peers exist that mandate LE legacy OOB and
++reject a pairing request that offers Secure Connections.
++
++``TK`` is the 128-bit Temporary Key, in the same byte order as the ``Value``
++parameter of ``Load Long Term Keys``.  The key is write only: no command or
++event returns it, and it is never included in debug output.  An all zero key
++is rejected, since that is the key Just Works uses and accepting it would
++mark an unauthenticated bond as MITM protected.
++
++Adding an entry for an address that already has one replaces it atomically.
++
++This command generates a Command Complete event on success or a Command
++Status event on failure.
++
++Possible errors::
++
++	Invalid Parameters
++	Not Supported
++	Failed
++	Invalid Index
++
++Remove Remote LE Legacy OOB Data Command
++========================================
++
++::
++
++	Command Code:		0x005d
++	Controller Index:	<controller id>
++	Command Parameters:	Address (6 Octets)
++				Address_Type (1 Octet)
++	Return Parameters:	Address (6 Octets)
++				Address_Type (1 Octet)
++
++When the provided address is ``00:00:00:00:00:00`` then all stored entries
++of this controller are removed, regardless of the Persistent flag.
++
++This command generates a Command Complete event on success or a Command
++Status event on failure.
++
++Possible errors::
++
++	Invalid Parameters
++	Invalid Index
+diff --git a/Documentation/networking/index.rst b/Documentation/networking/index.rst
+index 44a422ad3..be715c7c2 100644
+--- a/Documentation/networking/index.rst
++++ b/Documentation/networking/index.rst
+@@ -11,6 +11,7 @@ Contents:
+    af_xdp
+    bareudp
+    batman-adv
++   bluetooth-le-legacy-oob
+    can
+    can_ucan_protocol
+    device_drivers/index
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 8014b9f82..977405899 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -4717,6 +4717,7 @@ W:	http://www.bluez.org/
+ T:	git git://git.kernel.org/pub/scm/linux/kernel/git/bluetooth/bluetooth.git
+ T:	git git://git.kernel.org/pub/scm/linux/kernel/git/bluetooth/bluetooth-next.git
+ F:	Documentation/ABI/stable/sysfs-class-bluetooth
++F:	Documentation/networking/bluetooth-le-legacy-oob.rst
+ F:	include/net/bluetooth/
+ F:	net/bluetooth/
+ 
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index 3df59849d..998b44208 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -237,6 +237,24 @@ struct oob_data {
+ 	u8 rand256[16];
+ };
+ 
++/* LE legacy pairing OOB data: the 128-bit Temporary Key a peer expects to be
++ * used as the key of the legacy c1/s1 confirm and STK generation functions.
++ *
++ * Unlike struct oob_data (BR/EDR and LE Secure Connections OOB) this holds
++ * raw key material, so entries are only ever written by a CAP_NET_ADMIN
++ * capable mgmt caller, are never readable from userspace, and are wiped on
++ * release.  Entries are looked up from the SMP code under RCU and mutated
++ * under hdev->le_legacy_oob_lock.
++ */
++struct le_legacy_oob_data {
++	struct list_head list;
++	struct rcu_head  rcu;
++	bdaddr_t bdaddr;
++	u8 bdaddr_type;
++	u8 flags;
++	u8 tk[16];
++};
++
+ struct adv_info {
+ 	struct list_head list;
+ 	bool	enabled;
+@@ -562,6 +580,9 @@ struct hci_dev {
+ 	struct list_head	long_term_keys;
+ 	struct list_head	identity_resolving_keys;
+ 	struct list_head	remote_oob_data;
++	struct list_head	le_legacy_oob_data;
++	/* Serialises writers of le_legacy_oob_data; readers use RCU */
++	spinlock_t		le_legacy_oob_lock;
+ 	struct list_head	le_accept_list;
+ 	struct list_head	le_resolv_list;
+ 	struct list_head	le_conn_params;
+@@ -1884,6 +1905,15 @@ int hci_add_remote_oob_data(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ int hci_remove_remote_oob_data(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 			       u8 bdaddr_type);
+ 
++void hci_le_legacy_oob_data_clear(struct hci_dev *hdev);
++void hci_le_legacy_oob_data_clear_ephemeral(struct hci_dev *hdev);
++int hci_add_le_legacy_oob_data(struct hci_dev *hdev, const bdaddr_t *bdaddr,
++			       u8 bdaddr_type, u8 flags, const u8 tk[16]);
++int hci_remove_le_legacy_oob_data(struct hci_dev *hdev, const bdaddr_t *bdaddr,
++				  u8 bdaddr_type);
++bool hci_le_legacy_oob_tk(struct hci_dev *hdev, const bdaddr_t *bdaddr,
++			  u8 bdaddr_type, u8 *flags, u8 tk[16]);
++
+ void hci_adv_instances_clear(struct hci_dev *hdev);
+ struct adv_info *hci_find_adv_instance(struct hci_dev *hdev, u8 instance);
+ struct adv_info *hci_find_adv_sid(struct hci_dev *hdev, u8 sid);
+diff --git a/include/net/bluetooth/mgmt.h b/include/net/bluetooth/mgmt.h
+index 08daed7a9..56f6cde1c 100644
+--- a/include/net/bluetooth/mgmt.h
++++ b/include/net/bluetooth/mgmt.h
+@@ -893,6 +893,25 @@ struct mgmt_cp_hci_cmd_sync {
+ } __packed;
+ #define MGMT_HCI_CMD_SYNC_SIZE		6
+ 
++#define MGMT_OP_ADD_REMOTE_LE_LEGACY_OOB_DATA	0x005C
++struct mgmt_cp_add_remote_le_legacy_oob_data {
++	struct mgmt_addr_info addr;
++	__u8	flags;
++	__u8	tk[16];
++} __packed;
++#define MGMT_ADD_REMOTE_LE_LEGACY_OOB_DATA_SIZE	(MGMT_ADDR_INFO_SIZE + 17)
++
++#define MGMT_LE_LEGACY_OOB_FLAG_PERSISTENT	0x01
++#define MGMT_LE_LEGACY_OOB_FLAG_FORCE_LEGACY	0x02
++/* Bits 0x04..0x80 are reserved and must be zero. */
++#define MGMT_LE_LEGACY_OOB_FLAG_MASK		0x03
++
++#define MGMT_OP_REMOVE_REMOTE_LE_LEGACY_OOB_DATA	0x005D
++struct mgmt_cp_remove_remote_le_legacy_oob_data {
++	struct mgmt_addr_info addr;
++} __packed;
++#define MGMT_REMOVE_REMOTE_LE_LEGACY_OOB_DATA_SIZE	MGMT_ADDR_INFO_SIZE
++
+ #define MGMT_EV_CMD_COMPLETE		0x0001
+ struct mgmt_ev_cmd_complete {
+ 	__le16	opcode;
+diff --git a/net/bluetooth/hci_core.c b/net/bluetooth/hci_core.c
+index 5ba9fe826..3b0fa6326 100644
+--- a/net/bluetooth/hci_core.c
++++ b/net/bluetooth/hci_core.c
+@@ -1548,6 +1548,163 @@ int hci_add_remote_oob_data(struct hci_dev *hdev, bdaddr_t *bdaddr,
+ 	return 0;
+ }
+ 
++/* LE legacy pairing OOB Temporary Key storage.
++ *
++ * The list is mutated under hdev->le_legacy_oob_lock and read from the SMP
++ * code under RCU, so that a lookup can happen from any context without
++ * taking hdev->lock.  Released entries are wiped by the RCU callback: they
++ * hold raw key material.
++ */
++static void le_legacy_oob_data_free(struct rcu_head *head)
++{
++	struct le_legacy_oob_data *data = container_of(head,
++						       struct le_legacy_oob_data,
++						       rcu);
++
++	kfree_sensitive(data);
++}
++
++/* Caller must hold hdev->le_legacy_oob_lock or rcu_read_lock(). */
++static struct le_legacy_oob_data *
++hci_find_le_legacy_oob_data(struct hci_dev *hdev, const bdaddr_t *bdaddr,
++			    u8 bdaddr_type)
++{
++	struct le_legacy_oob_data *data;
++
++	list_for_each_entry_rcu(data, &hdev->le_legacy_oob_data, list,
++				lockdep_is_held(&hdev->le_legacy_oob_lock)) {
++		if (bacmp(bdaddr, &data->bdaddr))
++			continue;
++		if (data->bdaddr_type != bdaddr_type)
++			continue;
++		return data;
++	}
++
++	return NULL;
++}
++
++/* hci_le_legacy_oob_tk - fetch the stored LE legacy OOB data for a peer
++ * @hdev: the controller the entry is scoped to
++ * @bdaddr: peer address
++ * @bdaddr_type: peer address type, BDADDR_LE_PUBLIC or BDADDR_LE_RANDOM
++ * @flags: if non-NULL, receives the MGMT_LE_LEGACY_OOB_FLAG_* of the entry
++ * @tk: if non-NULL, receives the 128-bit Temporary Key
++ *
++ * Returns true if an entry exists.  Safe to call from any context.
++ */
++bool hci_le_legacy_oob_tk(struct hci_dev *hdev, const bdaddr_t *bdaddr,
++			  u8 bdaddr_type, u8 *flags, u8 tk[16])
++{
++	struct le_legacy_oob_data *data;
++	bool found = false;
++
++	rcu_read_lock();
++
++	data = hci_find_le_legacy_oob_data(hdev, bdaddr, bdaddr_type);
++	if (data) {
++		if (flags)
++			*flags = data->flags;
++		if (tk)
++			memcpy(tk, data->tk, 16);
++		found = true;
++	}
++
++	rcu_read_unlock();
++
++	return found;
++}
++
++/* hci_add_le_legacy_oob_data - store an LE legacy OOB Temporary Key
++ *
++ * An entry for the same address and address type is replaced atomically:
++ * a concurrent lookup sees either the old or the new entry, never neither.
++ */
++int hci_add_le_legacy_oob_data(struct hci_dev *hdev, const bdaddr_t *bdaddr,
++			       u8 bdaddr_type, u8 flags, const u8 tk[16])
++{
++	struct le_legacy_oob_data *data, *old;
++
++	data = kzalloc_obj(*data, GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++
++	bacpy(&data->bdaddr, bdaddr);
++	data->bdaddr_type = bdaddr_type;
++	data->flags = flags;
++	memcpy(data->tk, tk, 16);
++
++	spin_lock(&hdev->le_legacy_oob_lock);
++
++	old = hci_find_le_legacy_oob_data(hdev, bdaddr, bdaddr_type);
++	if (old) {
++		list_replace_rcu(&old->list, &data->list);
++		call_rcu(&old->rcu, le_legacy_oob_data_free);
++	} else {
++		list_add_rcu(&data->list, &hdev->le_legacy_oob_data);
++	}
++
++	spin_unlock(&hdev->le_legacy_oob_lock);
++
++	/* Never log the key material itself. */
++	bt_dev_dbg(hdev, "LE legacy OOB TK set for %pMR (%u) flags 0x%2.2x",
++		   bdaddr, bdaddr_type, flags);
++
++	return 0;
++}
++
++int hci_remove_le_legacy_oob_data(struct hci_dev *hdev, const bdaddr_t *bdaddr,
++				  u8 bdaddr_type)
++{
++	struct le_legacy_oob_data *data;
++	int err = -ENOENT;
++
++	spin_lock(&hdev->le_legacy_oob_lock);
++
++	data = hci_find_le_legacy_oob_data(hdev, bdaddr, bdaddr_type);
++	if (data) {
++		list_del_rcu(&data->list);
++		call_rcu(&data->rcu, le_legacy_oob_data_free);
++		err = 0;
++	}
++
++	spin_unlock(&hdev->le_legacy_oob_lock);
++
++	if (!err)
++		bt_dev_dbg(hdev, "LE legacy OOB TK removed for %pMR (%u)",
++			   bdaddr, bdaddr_type);
++
++	return err;
++}
++
++static void __hci_le_legacy_oob_data_clear(struct hci_dev *hdev, bool all)
++{
++	struct le_legacy_oob_data *data, *n;
++
++	spin_lock(&hdev->le_legacy_oob_lock);
++
++	list_for_each_entry_safe(data, n, &hdev->le_legacy_oob_data, list) {
++		if (!all && (data->flags & MGMT_LE_LEGACY_OOB_FLAG_PERSISTENT))
++			continue;
++		list_del_rcu(&data->list);
++		call_rcu(&data->rcu, le_legacy_oob_data_free);
++	}
++
++	spin_unlock(&hdev->le_legacy_oob_lock);
++}
++
++void hci_le_legacy_oob_data_clear(struct hci_dev *hdev)
++{
++	__hci_le_legacy_oob_data_clear(hdev, true);
++}
++
++/* Drop every entry that was not added with MGMT_LE_LEGACY_OOB_FLAG_PERSISTENT.
++ * Called when the controller is powered down.
++ */
++void hci_le_legacy_oob_data_clear_ephemeral(struct hci_dev *hdev)
++{
++	__hci_le_legacy_oob_data_clear(hdev, false);
++}
++
+ /* This function requires the caller holds hdev->lock */
+ struct adv_info *hci_find_adv_instance(struct hci_dev *hdev, u8 instance)
+ {
+@@ -2482,6 +2639,7 @@ struct hci_dev *hci_alloc_dev_priv(int sizeof_priv)
+ 	mutex_init(&hdev->lock);
+ 	mutex_init(&hdev->req_lock);
+ 	mutex_init(&hdev->mgmt_pending_lock);
++	spin_lock_init(&hdev->le_legacy_oob_lock);
+ 
+ 	ida_init(&hdev->unset_handle_ida);
+ 
+@@ -2494,6 +2652,7 @@ struct hci_dev *hci_alloc_dev_priv(int sizeof_priv)
+ 	INIT_LIST_HEAD(&hdev->long_term_keys);
+ 	INIT_LIST_HEAD(&hdev->identity_resolving_keys);
+ 	INIT_LIST_HEAD(&hdev->remote_oob_data);
++	INIT_LIST_HEAD(&hdev->le_legacy_oob_data);
+ 	INIT_LIST_HEAD(&hdev->le_accept_list);
+ 	INIT_LIST_HEAD(&hdev->le_resolv_list);
+ 	INIT_LIST_HEAD(&hdev->le_conn_params);
+@@ -2720,6 +2879,7 @@ void hci_release_dev(struct hci_dev *hdev)
+ 	hci_smp_ltks_clear(hdev);
+ 	hci_smp_irks_clear(hdev);
+ 	hci_remote_oob_data_clear(hdev);
++	hci_le_legacy_oob_data_clear(hdev);
+ 	hci_adv_instances_clear(hdev);
+ 	hci_adv_monitors_clear(hdev);
+ 	hci_bdaddr_list_clear(&hdev->le_accept_list);
+diff --git a/net/bluetooth/hci_sync.c b/net/bluetooth/hci_sync.c
+index 8ccc3b22e..6e9eabd12 100644
+--- a/net/bluetooth/hci_sync.c
++++ b/net/bluetooth/hci_sync.c
+@@ -5511,6 +5511,10 @@ int hci_dev_close_sync(struct hci_dev *hdev)
+ 	hci_inquiry_cache_flush(hdev);
+ 	hci_pend_le_actions_clear(hdev);
+ 	hci_conn_hash_flush(hdev);
++	/* LE legacy OOB Temporary Keys are ephemeral unless userspace asked
++	 * for them to be persistent.
++	 */
++	hci_le_legacy_oob_data_clear_ephemeral(hdev);
+ 	/* Prevent data races on hdev->smp_data or hdev->smp_bredr_data */
+ 	smp_unregister(hdev);
+ 	hci_dev_unlock(hdev);
+diff --git a/net/bluetooth/mgmt.c b/net/bluetooth/mgmt.c
+index c16b0b80c..92d8aa0cb 100644
+--- a/net/bluetooth/mgmt.c
++++ b/net/bluetooth/mgmt.c
+@@ -130,6 +130,8 @@ static const u16 mgmt_commands[] = {
+ 	MGMT_OP_MESH_SEND,
+ 	MGMT_OP_MESH_SEND_CANCEL,
+ 	MGMT_OP_HCI_CMD_SYNC,
++	MGMT_OP_ADD_REMOTE_LE_LEGACY_OOB_DATA,
++	MGMT_OP_REMOVE_REMOTE_LE_LEGACY_OOB_DATA,
+ };
+ 
+ static const u16 mgmt_events[] = {
+@@ -6010,6 +6012,83 @@ static int remove_remote_oob_data(struct sock *sk, struct hci_dev *hdev,
+ 	return err;
+ }
+ 
++/* LE legacy pairing OOB data carries raw key material (the 128-bit Temporary
++ * Key used as the key of the c1/s1 functions), which is why it lives in its
++ * own command rather than in Add Remote OOB Data: the existing command
++ * carries only commitment values (hash/rand), it is BR/EDR only in practice,
++ * and its payload is discriminated by length alone.
++ *
++ * The key can only ever be written, never read back, and the command is not
++ * listed as untrusted, so a CAP_NET_ADMIN capable caller is required.
++ */
++static int add_remote_le_legacy_oob_data(struct sock *sk, struct hci_dev *hdev,
++					 void *data, u16 len)
++{
++	struct mgmt_cp_add_remote_le_legacy_oob_data *cp = data;
++	u8 status = MGMT_STATUS_SUCCESS;
++	int err;
++
++	bt_dev_dbg(hdev, "sock %p", sk);
++
++	if (!lmp_le_capable(hdev))
++		return mgmt_cmd_complete(sk, hdev->id,
++					 MGMT_OP_ADD_REMOTE_LE_LEGACY_OOB_DATA,
++					 MGMT_STATUS_NOT_SUPPORTED,
++					 &cp->addr, sizeof(cp->addr));
++
++	/* Reject BR/EDR addresses, undefined flag bits, and an all-zero key:
++	 * a zero Temporary Key is what Just Works uses, so accepting one here
++	 * would mark an unauthenticated bond as MITM protected.
++	 */
++	if (!bdaddr_type_is_le(cp->addr.type) ||
++	    (cp->flags & ~MGMT_LE_LEGACY_OOB_FLAG_MASK) ||
++	    !memcmp(cp->tk, ZERO_KEY, sizeof(cp->tk)))
++		return mgmt_cmd_complete(sk, hdev->id,
++					 MGMT_OP_ADD_REMOTE_LE_LEGACY_OOB_DATA,
++					 MGMT_STATUS_INVALID_PARAMS,
++					 &cp->addr, sizeof(cp->addr));
++
++	err = hci_add_le_legacy_oob_data(hdev, &cp->addr.bdaddr, cp->addr.type,
++					 cp->flags, cp->tk);
++	if (err < 0)
++		status = MGMT_STATUS_FAILED;
++
++	return mgmt_cmd_complete(sk, hdev->id,
++				 MGMT_OP_ADD_REMOTE_LE_LEGACY_OOB_DATA, status,
++				 &cp->addr, sizeof(cp->addr));
++}
++
++static int remove_remote_le_legacy_oob_data(struct sock *sk,
++					    struct hci_dev *hdev,
++					    void *data, u16 len)
++{
++	struct mgmt_cp_remove_remote_le_legacy_oob_data *cp = data;
++	u8 status = MGMT_STATUS_SUCCESS;
++	int err;
++
++	bt_dev_dbg(hdev, "sock %p", sk);
++
++	if (!bdaddr_type_is_le(cp->addr.type))
++		return mgmt_cmd_complete(sk, hdev->id,
++					 MGMT_OP_REMOVE_REMOTE_LE_LEGACY_OOB_DATA,
++					 MGMT_STATUS_INVALID_PARAMS,
++					 &cp->addr, sizeof(cp->addr));
++
++	/* An all-zero address removes every stored entry. */
++	if (!bacmp(&cp->addr.bdaddr, BDADDR_ANY)) {
++		hci_le_legacy_oob_data_clear(hdev);
++	} else {
++		err = hci_remove_le_legacy_oob_data(hdev, &cp->addr.bdaddr,
++						    cp->addr.type);
++		if (err < 0)
++			status = MGMT_STATUS_INVALID_PARAMS;
++	}
++
++	return mgmt_cmd_complete(sk, hdev->id,
++				 MGMT_OP_REMOVE_REMOTE_LE_LEGACY_OOB_DATA,
++				 status, &cp->addr, sizeof(cp->addr));
++}
++
+ static bool discovery_type_is_valid(struct hci_dev *hdev, uint8_t type,
+ 				    uint8_t *mgmt_status)
+ {
+@@ -9595,6 +9674,10 @@ static const struct hci_mgmt_handler mgmt_handlers[] = {
+ 						HCI_MGMT_VAR_LEN },
+ 	{ mesh_send_cancel,        MGMT_MESH_SEND_CANCEL_SIZE },
+ 	{ mgmt_hci_cmd_sync,       MGMT_HCI_CMD_SYNC_SIZE, HCI_MGMT_VAR_LEN },
++	{ add_remote_le_legacy_oob_data,
++				   MGMT_ADD_REMOTE_LE_LEGACY_OOB_DATA_SIZE },
++	{ remove_remote_le_legacy_oob_data,
++				   MGMT_REMOVE_REMOTE_LE_LEGACY_OOB_DATA_SIZE },
+ };
+ 
+ void mgmt_index_added(struct hci_dev *hdev)

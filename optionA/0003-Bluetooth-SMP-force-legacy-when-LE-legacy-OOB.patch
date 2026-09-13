@@ -1,0 +1,75 @@
+From 5c51a3b9fea7f0d2385892ff85766be0e7ff4abd Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 12:25:42 +1000
+Subject: [PATCH 3/5] Bluetooth: SMP: force legacy pairing when an LE legacy
+ OOB TK is set
+
+Storing a Temporary Key is not enough on its own.  An SC-capable adapter
+sets SMP_AUTH_SC in build_pairing_cmd(), which makes the peer negotiate
+Secure Connections and takes the SC OOB path - that needs P-256 confirm
+and random values a legacy-OOB-only peripheral cannot produce.  The
+Pairing Request also has to carry oob_flag = SMP_OOB_PRESENT: devices in
+this class reject a Pairing Request without it outright, which is what
+made the Microsoft Modern Keyboard (model 1780) unpairable.
+
+So when the peer has an LE legacy OOB Temporary Key stored, clear
+SMP_AUTH_SC and advertise SMP_OOB_PRESENT.  This only happens for a peer
+userspace has explicitly armed, so it cannot downgrade any other pairing.
+
+get_auth_method() has to agree: LE legacy OOB is MITM-capable whatever
+the IO capabilities are, so return REQ_OOB rather than consulting
+gen_method[][], which would pick JUST_WORKS for a NoInputNoOutput pair
+and have the pairing handlers reject it for not being able to achieve
+MITM before tk_request() ever ran.
+
+With this in place a Modern Keyboard pairs through MGMT_OP_PAIR_DEVICE
+and the in-kernel Security Manager: the Pairing Request goes out with
+OOB present and SC clear, the peer answers with OOB present, legacy
+confirm/random succeed against the out-of-band TK, and encryption comes
+up with an authenticated LTK.
+
+Signed-off-by: Russell Oliver <roliver8143@gmail.com>
+---
+ net/bluetooth/smp.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/net/bluetooth/smp.c b/net/bluetooth/smp.c
+index ec716efe6..6bb9d3b4f 100644
+--- a/net/bluetooth/smp.c
++++ b/net/bluetooth/smp.c
+@@ -671,6 +671,17 @@ static void build_pairing_cmd(struct l2cap_conn *conn,
+ 	if (hci_dev_test_flag(hdev, HCI_PRIVACY))
+ 		local_dist |= SMP_DIST_ID_KEY;
+ 
++	/* When userspace has supplied an LE legacy pairing Temporary Key for
++	 * this peer, ask for legacy pairing explicitly and tell the peer we
++	 * have OOB data.  An SC-capable adapter has SMP_AUTH_SC set here and
++	 * would otherwise take the Secure Connections OOB path below, which
++	 * needs P-256 confirm/random values the peer does not have.
++	 */
++	if (smp_le_legacy_oob_data(hcon)) {
++		authreq &= ~SMP_AUTH_SC;
++		oob_flag = SMP_OOB_PRESENT;
++	}
++
+ 	if (hci_dev_test_flag(hdev, HCI_SC_ENABLED) &&
+ 	    (authreq & SMP_AUTH_SC)) {
+ 		struct oob_data *oob_data;
+@@ -861,6 +872,14 @@ static u8 get_auth_method(struct smp_chan *smp, u8 local_io, u8 remote_io)
+ 	if (test_bit(SMP_FLAG_SC, &smp->flags))
+ 		return sc_method[remote_io][local_io];
+ 
++	/* LE legacy OOB is MITM-capable whatever the IO capabilities are.
++	 * Report it so the "can MITM be achieved?" checks in the pairing
++	 * handlers do not reject a NoInputNoOutput pairing before
++	 * tk_request() gets a chance to use the Temporary Key.
++	 */
++	if (smp->conn && smp_le_legacy_oob_data(smp->conn->hcon))
++		return REQ_OOB;
++
+ 	return gen_method[remote_io][local_io];
+ }
+ 
+-- 
+2.55.0
+

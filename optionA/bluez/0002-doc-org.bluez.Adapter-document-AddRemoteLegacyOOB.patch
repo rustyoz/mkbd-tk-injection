@@ -1,0 +1,71 @@
+From 34a12dd634274995c1742981602e40feec7d474e Mon Sep 17 00:00:00 2001
+From: Russell Oliver <roliver8143@gmail.com>
+Date: Fri, 11 Sep 2026 21:59:51 +1000
+Subject: [PATCH] doc: org.bluez.Adapter: document AddRemoteLegacyOOB
+
+---
+ doc/org.bluez.Adapter.rst | 48 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+
+diff --git a/doc/org.bluez.Adapter.rst b/doc/org.bluez.Adapter.rst
+index c84490d..e7d6656 100644
+--- a/doc/org.bluez.Adapter.rst
++++ b/doc/org.bluez.Adapter.rst
+@@ -246,6 +246,54 @@ Possible errors:
+ :org.bluez.Error.NotReady:
+ :org.bluez.Error.Failed:
+ 
++void AddRemoteLegacyOOB(string address, string address_type, array{byte} tk)
++``````````````````````````````````````````````````````````````````````````
++
++Supplies the 128-bit LE legacy Security Manager Temporary Key for a peer that
++requires out-of-band pairing on the *legacy* (non-Secure-Connections) LE
++pairing path — a Just Works or passkey Pairing Request from this adapter would
++otherwise be rejected outright by such a peer. Requires a patched kernel: see
++Documentation/networking/bluetooth-le-legacy-oob.rst upstream (mainline BlueZ
++targets a kernel with no such interface today).
++
++The kernel arms the key for exactly one pairing attempt with this identity: it
++is consumed on a successful pairing and kept (not re-usable, but not wiped
++either) across a failed one, so a retry does not need this method called
++again, but a *second successful* pairing with the same peer does. Call
++**Device1.Pair()** (or an equivalent directed-connect + pair) immediately
++after; do not cache and reuse a `tk` across bonds.
++
++:string address:
++
++	The Bluetooth address of the remote device, in the identity address the
++	adapter will connect to — not a resolvable private address.
++
++:string address_type:
++
++	Possible values:
++
++	:"public":
++
++		Public address.
++
++	:"random":
++
++		Static random address.
++
++:array{byte} tk:
++
++	The 16-byte Temporary Key, in the byte order the peer's out-of-band
++	channel delivered it (Security Manager wire order — do not reverse it).
++
++Possible errors:
++
++:org.bluez.Error.InvalidArguments: Bad address, address type, or a `tk` that
++	is not exactly 16 bytes.
++:org.bluez.Error.NotReady: Adapter is not powered.
++:org.bluez.Error.Failed: The kernel rejected the command (see the kernel log
++	for the exact reason — commonly means the kernel does not support this
++	extended `Add Remote OOB Data` payload).
++
+ Properties
+ ----------
+ 
+-- 
+2.55.0
+
