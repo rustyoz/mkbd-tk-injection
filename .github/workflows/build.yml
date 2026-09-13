@@ -1,0 +1,172 @@
+name: build
+
+# Three independent build checks, none of which need the physical keyboard
+# or a matching running kernel:
+#   1. rust          - cargo build/test/clippy for rust/mkbd-pair, the tool
+#                       this repo ships.
+#   2. kernel-patch   - the Option A kernel patches (0001-0004) still apply
+#                       and net/bluetooth still compiles against a generic
+#                       upstream kernel tree. Patch 0005 (selftest) is
+#                       version-specific and intentionally skipped here -
+#                       see optionA/BUILD.md.
+#   3. bluez-patch    - the Option A BlueZ patches still apply and
+#                       bluetoothd still links with AddRemoteLegacyOOB
+#                       present.
+#
+# None of this produces a module/binary that's installable as-is: the
+# kernel module here is built against a generic defconfig tree, not any
+# specific user's running kernel (vermagic will not match), and is uploaded
+# purely so patch/compile breakage is visible without needing hardware.
+# Follow README.md's Installation section to build for your own machine.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust:
+    name: rust / mkbd-pair
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust/mkbd-pair
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/mkbd-pair
+
+      - name: cargo build --release
+        run: cargo build --release --locked
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mkbd-pair-x86_64-linux
+          path: rust/mkbd-pair/target/release/mkbd-pair
+
+  kernel-patch:
+    name: kernel-patch (linux-7.2.3)
+    runs-on: ubuntu-latest
+    env:
+      KVER: 7.2.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc
+
+      - name: Download linux-${{ env.KVER }} source
+        run: |
+          set -euo pipefail
+          kmajor="v$(echo "$KVER" | cut -d. -f1).x"
+          curl -fL -o linux-src.tar.xz "https://cdn.kernel.org/pub/linux/kernel/${kmajor}/linux-${KVER}.tar.xz"
+          tar -xf linux-src.tar.xz
+          mv "linux-${KVER}" linux-src
+
+      - name: Apply Option A kernel patches 0001-0004
+        working-directory: linux-src
+        run: |
+          set -euo pipefail
+          git init -q
+          git config user.email "ci@example.invalid"
+          git config user.name "mkbd-tk-injection CI"
+          git add -A
+          git commit -q -m "linux-${KVER} baseline"
+          git am ../optionA/0001-*.patch \
+                 ../optionA/0002-*.patch \
+                 ../optionA/0003-*.patch \
+                 ../optionA/0004-*.patch
+
+      - name: Build net/bluetooth against a generic defconfig
+        working-directory: linux-src
+        run: |
+          set -euo pipefail
+          make defconfig
+          # defconfig doesn't enable Bluetooth at all, so net/bluetooth would
+          # otherwise build zero source files and silently produce no .ko.
+          ./scripts/config --module CONFIG_BT
+          make olddefconfig
+          make modules_prepare
+          # modules_prepare alone never builds vmlinux, so there's no
+          # whole-kernel Module.symvers for modpost to check cross-module
+          # symbol versions against -- expected here (this is a bluetooth.ko
+          # in isolation, not a real installable build; see the vermagic
+          # note in this workflow's header), so downgrade modpost's
+          # unresolved-symbol errors to warnings rather than paying for a
+          # full kernel build just to satisfy them.
+          KBUILD_MODPOST_WARN=1 make -j"$(nproc)" M=net/bluetooth
+
+      - name: Sanity-check the module built
+        working-directory: linux-src
+        run: |
+          set -euo pipefail
+          test -f net/bluetooth/bluetooth.ko
+          modinfo net/bluetooth/bluetooth.ko | grep -E 'vermagic|srcversion'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bluetooth-optionA-linux-${{ env.KVER }}-generic.ko
+          path: linux-src/net/bluetooth/bluetooth.ko
+
+  bluez-patch:
+    name: bluez-patch (bluez-5.87)
+    runs-on: ubuntu-latest
+    env:
+      BLUEZ_VER: 5.87
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install BlueZ build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libglib2.0-dev \
+            libdbus-1-dev libudev-dev libical-dev libreadline-dev python3
+
+      - name: Download bluez-${{ env.BLUEZ_VER }} source
+        run: |
+          set -euo pipefail
+          curl -fLO "https://mirrors.edge.kernel.org/pub/linux/bluetooth/bluez-${BLUEZ_VER}.tar.xz"
+          tar -xf "bluez-${BLUEZ_VER}.tar.xz"
+
+      - name: Apply Option A BlueZ patches
+        working-directory: bluez-${{ env.BLUEZ_VER }}
+        run: |
+          set -euo pipefail
+          git init -q
+          git config user.email "ci@example.invalid"
+          git config user.name "mkbd-tk-injection CI"
+          git add -A
+          git commit -q -m "bluez-${BLUEZ_VER} baseline"
+          git am ../optionA/bluez/0001-*.patch ../optionA/bluez/0002-*.patch
+
+      - name: Build bluetoothd
+        working-directory: bluez-${{ env.BLUEZ_VER }}
+        run: |
+          set -euo pipefail
+          ./configure --disable-obex --disable-cups --disable-manpages
+          make -j"$(nproc)" src/builtin.h
+          make -j"$(nproc)" src/bluetoothd
+
+      - name: Sanity-check AddRemoteLegacyOOB is present
+        working-directory: bluez-${{ env.BLUEZ_VER }}
+        run: strings src/bluetoothd | grep -q AddRemoteLegacyOOB
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bluetoothd-optionA-${{ env.BLUEZ_VER }}
+          path: bluez-${{ env.BLUEZ_VER }}/src/bluetoothd

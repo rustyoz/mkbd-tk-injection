@@ -44,6 +44,7 @@ const AGENT_PATH: &str = "/mkbd/optionA/agent";
     default_path = "/"
 )]
 trait ObjectManager {
+    #[allow(clippy::type_complexity)] // matches the a{oa{sa{sv}}} D-Bus signature shape
     fn get_managed_objects(
         &self,
     ) -> zbus::Result<HashMap<OwnedObjectPath, HashMap<String, HashMap<String, OwnedValue>>>>;

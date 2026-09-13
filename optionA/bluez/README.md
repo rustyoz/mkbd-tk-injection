@@ -32,21 +32,26 @@ strings src/bluetoothd | grep AddRemoteLegacyOOB   # sanity check
 
 Verified 2026-09-11: both patches apply clean with `git am` on a fresh
 bluez-5.87 tree, and `src/bluetoothd` links with the new method present.
-**Not yet installed or tested against a running system** — this replaces the
-system's `bluetoothd`, a much bigger blast radius than the kernel module
-(every Bluetooth device on the box goes through it), so swapping it in wants
-its own care (package it properly / `systemctl stop bluetooth` first / keep
-the stock binary to roll back to) rather than a quick copy-over.
+Installing it replaces the system's `bluetoothd` — a much bigger blast
+radius than the kernel module (every Bluetooth device on the box goes
+through it) — so swapping it in wants its own care (`test/install-optionA-bluetoothd.sh`
+backs up and can roll back the stock binary).
 
-## Status
+**Status update, 2026-09-12: installed and hardware-verified live** — see
+`../BUILD.md`'s "Adapter1.AddRemoteLegacyOOB() exercised live over D-Bus"
+entry for the full account, and `../../rust/mkbd-pair/README.md` for the
+Rust port that's now the recommended way to drive it
+(`Adapter1.AddRemoteLegacyOOB()` → `Adapter1.ConnectDevice()` →
+`Device1.Pair()`, `bluetoothd` never stopped). `../BUILD.md` is the
+authoritative status doc; the checklist below is this file's own
+build-only status, kept for the patches themselves.
+
+## Status (patch build only — see `../BUILD.md` for live-hardware status)
 
 - [x] Patches apply clean against bluez-5.87.
 - [x] `bluetoothd` builds and links with `AddRemoteLegacyOOB` present.
-- [ ] Not run against a live `bluetoothd` — the D-Bus method has not actually
-      been called end to end (`gdbus call ... AddRemoteLegacyOOB ...` against
-      a running masked/test instance, or wiring `test/optionA-pair.py` to call
-      it via D-Bus instead of raw mgmt, is the next step once this is
-      installed).
+- [x] Installed and exercised live over D-Bus, hardware-verified — see
+      `../BUILD.md`.
 - [ ] `monitor/packet.c` btmon decode and the `src/device.c`
       premature-OOB-removal check (`BLUEZ-NOTES.md` 2.2 / 2.6) are still
       spec-only, not patched.
