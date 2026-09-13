@@ -102,7 +102,14 @@ jobs:
           ./scripts/config --module CONFIG_BT
           make olddefconfig
           make modules_prepare
-          make -j"$(nproc)" M=net/bluetooth
+          # modules_prepare alone never builds vmlinux, so there's no
+          # whole-kernel Module.symvers for modpost to check cross-module
+          # symbol versions against -- expected here (this is a bluetooth.ko
+          # in isolation, not a real installable build; see the vermagic
+          # note in this workflow's header), so downgrade modpost's
+          # unresolved-symbol errors to warnings rather than paying for a
+          # full kernel build just to satisfy them.
+          KBUILD_MODPOST_WARN=1 make -j"$(nproc)" M=net/bluetooth
 
       - name: Sanity-check the module built
         working-directory: linux-src
