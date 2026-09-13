@@ -90,9 +90,17 @@ fn find_gui_session() -> Option<GuiSession> {
     let uid = String::from_utf8_lossy(&uid_out.stdout).trim().to_string();
     let runtime_dir = format!("/run/user/{uid}");
 
+    // Pass XDG_RUNTIME_DIR as a literal `VAR=value` argv token, not via
+    // Command::env(): sudo's default env_reset discards environment
+    // variables set on its own process (which is all Command::env() can
+    // reach) and rebuilds a fresh environment for the target user, but it
+    // does specially recognize and apply `VAR=value` tokens given on its
+    // own command line before the program name.
     let env_out = Command::new("sudo")
-        .args(["-u", &user, "systemctl", "--user", "show-environment"])
-        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .arg("-u")
+        .arg(&user)
+        .arg(format!("XDG_RUNTIME_DIR={runtime_dir}"))
+        .args(["systemctl", "--user", "show-environment"])
         .output()
         .ok();
     let env_text = env_out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
@@ -113,15 +121,22 @@ fn find_gui_session() -> Option<GuiSession> {
 
 impl GuiSession {
     fn run_as_user(&self, cmd: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
+        // Same reasoning as find_gui_session(): these must be literal
+        // `VAR=value` argv tokens to survive sudo's env_reset, not
+        // Command::env() calls (which only set the *sudo* process's own
+        // environment, discarded when it builds the target user's). This
+        // was the actual bug behind zenity/notify-send silently failing to
+        // find a display and exiting non-zero near-instantly, which looked
+        // identical to the user clicking "No".
         let mut c = Command::new("sudo");
         c.arg("-u").arg(&self.user);
-        c.env("XDG_RUNTIME_DIR", &self.runtime_dir);
-        c.env("DBUS_SESSION_BUS_ADDRESS", &self.dbus_addr);
+        c.arg(format!("XDG_RUNTIME_DIR={}", self.runtime_dir));
+        c.arg(format!("DBUS_SESSION_BUS_ADDRESS={}", self.dbus_addr));
         if let Some(w) = &self.wayland_display {
-            c.env("WAYLAND_DISPLAY", w);
+            c.arg(format!("WAYLAND_DISPLAY={w}"));
         }
         if let Some(d) = &self.x_display {
-            c.env("DISPLAY", d);
+            c.arg(format!("DISPLAY={d}"));
         }
         c.arg(cmd).args(args);
         c.stdout(Stdio::null()).stderr(Stdio::null());
