@@ -97,6 +97,10 @@ jobs:
         run: |
           set -euo pipefail
           make defconfig
+          # defconfig doesn't enable Bluetooth at all, so net/bluetooth would
+          # otherwise build zero source files and silently produce no .ko.
+          ./scripts/config --module CONFIG_BT
+          make olddefconfig
           make modules_prepare
           make -j"$(nproc)" M=net/bluetooth
 
