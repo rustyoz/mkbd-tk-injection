@@ -2,16 +2,20 @@
 //! uncommitted changes) into the binary as GIT_HASH, so `mkbd-pair --version`
 //! can report exactly which commit it was built from -- e.g. to tell whether
 //! an installed /usr/local/bin/mkbd-pair actually picked up a given fix.
-//! No rerun-if-changed directives on purpose: omitting them makes cargo
-//! rerun this script on every build (its default when a build script gives
-//! no hints), which is what we want for a value that should always be
-//! current -- and `git rev-parse` from rust/mkbd-pair works whether this is
-//! a normal checkout or a git worktree (its `.git` is a file, not a dir,
-//! pointing at the real gitdir; git itself resolves that transparently).
+//!
+//! Correctly tracking "did HEAD change" would mean resolving HEAD's symbolic
+//! ref and watching whichever ref file it points at (different again for a
+//! git worktree, whose .git is a file pointing at a separate gitdir) --
+//! more machinery than this is worth. Instead this watches a path that can
+//! never exist: cargo can't cache an "unchanged" fingerprint for a file it
+//! can't stat, so it reruns this script on every build, which is exactly
+//! what a value that must always be current wants.
 
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-changed=NEVER_EXISTS_FORCES_ALWAYS_RERUN");
+
     let hash = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
         .output()
